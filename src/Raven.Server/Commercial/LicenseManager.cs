@@ -324,11 +324,8 @@ namespace Raven.Server.Commercial
                 using (var process = Process.GetCurrentProcess())
                 {
                     var utilizedCores = GetCoresLimitForNode(out var licenseLimits, firstRun == false);
-                    var clusterSize = GetClusterSize();
-                    var maxWorkingSet = Math.Min(LicenseStatus.MaxMemory / (double)clusterSize, utilizedCores * LicenseStatus.Ratio);
 
                     SetAffinity(process, utilizedCores, licenseLimits);
-                    SetMaxWorkingSet(process, Math.Max(1, maxWorkingSet));
                 }
 
                 ValidateLicenseStatus();
@@ -1509,33 +1506,6 @@ namespace Raven.Server.Commercial
             return (hasSnapshotBackup, hasCloudBackup, hasEncryptedBackup);
         }
 
-        public void AssertCanAddNode()
-        {
-            if (IsValid(out var licenseLimit) == false)
-                throw licenseLimit;
-
-            var allNodesCount = _serverStore.GetClusterTopology().AllNodes.Count;
-            if (LicenseStatus.MaxCores <= allNodesCount)
-            {
-                var message = $"Cannot add the node to the cluster because the number of licensed cores is {LicenseStatus.MaxCores} " +
-                              $"while the number of nodes is {allNodesCount}. This will bring the number of utilized cores over the limit";
-                throw GenerateLicenseLimit(LimitType.Cores, message);
-            }
-
-            if (LicenseStatus.DistributedCluster == false)
-            {
-                var message = $"Your current license ({LicenseStatus.Type}) does not allow adding nodes to the cluster";
-                throw GenerateLicenseLimit(LimitType.ForbiddenHost, message);
-            }
-
-            var maxClusterSize = LicenseStatus.MaxClusterSize;
-            var clusterSize = GetClusterSize();
-            if (++clusterSize > maxClusterSize)
-            {
-                var message = $"Your current license allows up to {maxClusterSize} nodes in a cluster";
-                throw GenerateLicenseLimit(LimitType.ClusterSize, message);
-            }
-        }
 
         public void AssertCanAddAdditionalAssembliesFromNuGet(IndexDefinition indexDefinition)
         {

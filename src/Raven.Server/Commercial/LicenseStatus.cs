@@ -69,7 +69,7 @@ namespace Raven.Server.Commercial
 
         public double Ratio => Math.Max((double)MaxMemory / MaxCores, 1);
 
-        private int MaxClusterSizeInternal => GetValue<int?>(LicenseAttribute.MaxClusterSize) ?? 1;
+        private int MaxClusterSizeInternal => int.MaxValue;
 
         public LicenseType Type
         {
@@ -144,11 +144,11 @@ namespace Raven.Server.Commercial
 
         public DateTime? SubscriptionExpiration => GetValue<DateTime?>(LicenseAttribute.SubscriptionExpiration) ?? Expiration;
 
-        public int MaxMemory => GetValue<int?>(LicenseAttribute.Memory) ?? 6;
+        public int MaxMemory => int.MaxValue;
 
-        public int MaxCores => GetValue<int?>(LicenseAttribute.Cores) ?? 3;
+        public int MaxCores => int.MaxValue;
 
-        public int? MaxCoresPerNode => GetValue<int?>(LicenseAttribute.MaxCoresPerNode, agplValue: 2);
+        public int? MaxCoresPerNode => null;
 
         public int MaxClusterSize
         {
@@ -171,7 +171,7 @@ namespace Raven.Server.Commercial
 
         public bool HasSnmpMonitoring => Enabled(LicenseAttribute.Snmp);
 
-        public bool DistributedCluster => Enabled(LicenseAttribute.DistributedCluster);
+        public bool DistributedCluster => true;
 
         public bool HasSnapshotBackups => Enabled(LicenseAttribute.SnapshotBackup);
 

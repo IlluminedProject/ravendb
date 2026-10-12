@@ -396,7 +396,6 @@ namespace Raven.Server.Documents.Handlers.Admin
 
             await ServerStore.EnsureNotPassiveAsync();
 
-            ServerStore.LicenseManager.AssertCanAddNode();
 
             if (ServerStore.IsLeader())
             {

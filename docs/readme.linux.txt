@@ -63,6 +63,11 @@ Use the cluster HTTP URL when adding a node to the cluster. Existing multi-node 
 topology URLs must already use reachable cluster addresses; startup only updates a
 single-node topology automatically.
 
+* Fork Cluster Capacity
+This fork does not enforce license limits on distributed cluster membership, cluster
+size, CPU count or process working-set memory. Explicit node resource settings and
+physical capacity still apply. Other licensed feature checks are unchanged.
+
 
 * Upgrading to a New Version
 Follow the upgrade instructions available at: https://docs.ravendb.net/7.2/start/installation/upgrading-to-new-version
