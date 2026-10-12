@@ -157,7 +157,7 @@ namespace Raven.Server.Documents.Replication.Outgoing
             request[nameof(ReplicationInitialRequest.Database)] = _parent.Database.Name; // my database
             request[nameof(ReplicationInitialRequest.DatabaseGroupId)] = _parent.Database.DatabaseGroupId; // my database id
             request[nameof(ReplicationInitialRequest.SourceUrl)] = _parent._server.GetNodeHttpServerUrl();
-            request[nameof(ReplicationInitialRequest.Info)] = _parent._server.GetTcpInfoAndCertificates(null); // my connection info
+            request[nameof(ReplicationInitialRequest.Info)] = _parent._server.GetTcpInfoAndCertificates(null, forExternalUse: true); // my connection info
             request[nameof(ReplicationInitialRequest.PullReplicationDefinitionName)] = _node.HubName;
             request[nameof(ReplicationInitialRequest.PullReplicationSinkTaskName)] = _node.GetTaskName();
 

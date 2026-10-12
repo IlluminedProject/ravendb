@@ -9,14 +9,16 @@ namespace Raven.Client.ServerWide.Commands
     public sealed class GetClusterTopologyCommand : RavenCommand<ClusterTopologyResponse>
     {
         private readonly string _debugTag;
+        private readonly bool _usePrivateUrls;
 
         public GetClusterTopologyCommand()
         {
         }
 
-        public GetClusterTopologyCommand(string debugTag)
+        public GetClusterTopologyCommand(string debugTag, bool usePrivateUrls = false)
         {
             _debugTag = debugTag;
+            _usePrivateUrls = usePrivateUrls;
         }
 
         public override HttpRequestMessage CreateRequest(JsonOperationContext ctx, ServerNode node, out string url)
@@ -24,6 +26,8 @@ namespace Raven.Client.ServerWide.Commands
             url = $"{node.Url}/cluster/topology";
             if (_debugTag != null)
                 url += "?" + _debugTag;
+            if (_usePrivateUrls)
+                url += (_debugTag != null ? "&" : "?") + "clientIndependent=true";
 
             return new HttpRequestMessage
             {

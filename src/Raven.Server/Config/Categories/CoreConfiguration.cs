@@ -25,7 +25,7 @@ namespace Raven.Server.Config.Categories
         [ConfigurationEntry("ServerUrl.Tcp", ConfigurationEntryScope.ServerWideOnly)]
         public string[] TcpServerUrls { get; set; }
 
-        [Description("When provided those URLs are used for Server->Server communications to this node. This is meant to allow inter-cluster communication via private IPs, while external clients will use external IPs.  The provided URL can be raw IPs or utilize hostnames.")]
+        [Description("The HTTP URL advertised for Server->Server communication, cluster bootstrap and reverse connection checks. Defaults to PublicServerUrl or ServerUrl. Does not change the listening addresses, PublicServerUrl or the local startup self-check. Its host is also used for the default cluster TCP address, with the bound TCP port; PublicServerUrl.Tcp.Cluster overrides that default.")]
         [DefaultValue(null)]
         [ConfigurationEntry("ServerUrl.Cluster", ConfigurationEntryScope.ServerWideOnly)]
         public UriSetting? ClusterServerUrl { get; set; }
@@ -40,7 +40,7 @@ namespace Raven.Server.Config.Categories
         [ConfigurationEntry("PublicServerUrl.Tcp.External", ConfigurationEntryScope.ServerWideOnly)]
         public UriSetting[] ExternalPublicTcpServerUrl { get; set; }
 
-        [Description("The URL under which server is publicly available, used for inter-node communication and access from behind a firewall, proxy etc.")]
+        [Description("The URL under which the server is publicly available to clients and for the local startup self-check. Used for inter-node communication when ServerUrl.Cluster is not specified.")]
         [DefaultValue(null)]
         [ConfigurationEntry("PublicServerUrl", ConfigurationEntryScope.ServerWideOnly)]
         public UriSetting? PublicServerUrl { get; set; }
@@ -121,6 +121,13 @@ namespace Raven.Server.Config.Categories
             ValidateSchemePublicVsBoundUrl();
         }
 
+        internal string GetNodeClusterHttpServerUrl(string serverWebUrl)
+        {
+            return ClusterServerUrl.HasValue
+                ? UrlUtil.TrimTrailingSlash(ClusterServerUrl.Value.UriValue)
+                : GetNodeHttpServerUrl(serverWebUrl);
+        }
+
         internal string GetNodeHttpServerUrl(string serverWebUrl)
         {
             if (PublicServerUrl.HasValue)
@@ -160,6 +167,16 @@ namespace Raven.Server.Config.Categories
 
                 return UrlUtil.TrimTrailingSlash(tcpUriBuilder.Uri.ToString());
             }
+        }
+
+        internal string GetNodeClusterTcpServerUrl(string serverWebUrl, int actualPort)
+        {
+            if (ClusterServerUrl.HasValue == false)
+                return GetNodeTcpServerUrl(serverWebUrl, actualPort);
+
+            var clusterServerUri = new Uri(ClusterServerUrl.Value.UriValue);
+            var tcpUriBuilder = new UriBuilder("tcp", clusterServerUri.Host, actualPort);
+            return UrlUtil.TrimTrailingSlash(tcpUriBuilder.Uri.ToString());
         }
 
         private string GetNodeHost(Uri serverWebUri, string serverUrlSettingValue)

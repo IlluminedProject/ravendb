@@ -77,7 +77,7 @@ namespace Raven.Server.Documents.Sharding.Handlers
             var shardExecutor = _parent.Context.ShardExecutor;
             using (_parent.Context.AllocateOperationContext(out JsonOperationContext ctx))
             {
-                var cmd = new GetTcpInfoCommand("sharded-replication", node.Database);
+                var cmd = new GetTcpInfoCommand(_parent.Context.ServerStore.GetNodeClusterHttpServerUrl(), "sharded-replication", node.Database);
                 RequestExecutor requestExecutor = null;
                 try
                 {

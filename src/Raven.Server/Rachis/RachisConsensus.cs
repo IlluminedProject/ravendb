@@ -328,7 +328,7 @@ namespace Raven.Server.Rachis
                         if (topology.GetUrlFromTag(_tag) != myUrl)
                         {
                             topology.Members.Remove(_tag);
-                            topology.Members.Add(_tag, configuration.Core.GetNodeHttpServerUrl(myUrl));
+                            topology.Members.Add(_tag, configuration.Core.GetNodeClusterHttpServerUrl(myUrl));
                             SetTopology(this, context, topology);
                         }
                     }

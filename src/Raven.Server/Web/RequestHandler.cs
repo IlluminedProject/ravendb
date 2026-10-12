@@ -825,9 +825,14 @@ namespace Raven.Server.Web
                 topology = ServerStore.GetClusterTopology(context);
             }
             var url = topology.GetUrlFromTag(ServerStore.LeaderTag);
-            if (string.Equals(url, ServerStore.GetNodeHttpServerUrl(), StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(url, ServerStore.GetNodeClusterHttpServerUrl(), StringComparison.OrdinalIgnoreCase))
             {
                 throw new NoLeaderException($"This node is not the leader, but the current topology does mark it as the leader. Such confusion is usually an indication of a network or configuration problem.");
+            }
+            if (string.Equals(HttpContext.Request.GetClientRequestedNodeUrl(), ServerStore.GetNodeClusterHttpServerUrl(), StringComparison.OrdinalIgnoreCase) == false &&
+                ServerStore.PublishedServerUrls != null && ServerStore.PublishedServerUrls.Urls.TryGetValue(ServerStore.LeaderTag, out var publishedUrls))
+            {
+                url = publishedUrls.PublicUrl ?? url;
             }
             var leaderLocation = url + HttpContext.Request.Path + HttpContext.Request.QueryString;
             HttpContext.Response.StatusCode = (int)HttpStatusCode.TemporaryRedirect;

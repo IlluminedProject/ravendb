@@ -213,11 +213,14 @@ namespace Raven.Server.Documents.Handlers.Admin
             {
                 var topology = ServerStore.GetClusterTopology(context);
                 var nodeTag = ServerStore.NodeTag;
+                var isClientIndependent = GetBoolValueQueryString("clientIndependent", false) ?? false;
 
                 if (topology.AllNodes.Count == 0)
                 {
                     var tag = ServerStore.NodeTag ?? "A";
-                    var serverUrl = ServerStore.GetNodeHttpServerUrl(HttpContext.Request.GetClientRequestedNodeUrl());
+                    var serverUrl = isClientIndependent
+                        ? ServerStore.GetNodeClusterHttpServerUrl(HttpContext.Request.GetClientRequestedNodeUrl())
+                        : ServerStore.GetNodeHttpServerUrl(HttpContext.Request.GetClientRequestedNodeUrl());
 
                     topology = new ClusterTopology(
                         topology.TopologyId ?? "dummy",
@@ -234,7 +237,6 @@ namespace Raven.Server.Documents.Handlers.Admin
                 }
                 else
                 {
-                    var isClientIndependent = GetBoolValueQueryString("clientIndependent", false) ?? false;
                     if (isClientIndependent == false && HttpContext.Items.TryGetValue(nameof(LocalEndpointClient.DebugPackage), out var _) == false)
                         topology.ReplaceCurrentNodeUrlWithClientRequestedNodeUrlIfNecessary(ServerStore, HttpContext);
                 }
@@ -409,7 +411,7 @@ namespace Raven.Server.Documents.Handlers.Admin
                     }
 
                     if (nodeInfo.ServerId == ServerStore.GetServerId())
-                        throw new InvalidOperationException($"Can't add a new node on {nodeUrl} to cluster because it's a synonym of the current node URL:{ServerStore.GetNodeHttpServerUrl()}");
+                        throw new InvalidOperationException($"Can't add a new node on {nodeUrl} to cluster because it's a synonym of the current node URL:{ServerStore.GetNodeClusterHttpServerUrl()}");
 
                     if (nodeInfo.TopologyId != null)
                     {

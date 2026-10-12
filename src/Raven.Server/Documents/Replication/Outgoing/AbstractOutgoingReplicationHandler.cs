@@ -461,7 +461,9 @@ namespace Raven.Server.Documents.Replication.Outgoing
             {
                 ["Type"] = "GetLastEtag",
                 [nameof(ReplicationLatestEtagRequest.SourceDatabaseName)] = _databaseName,
-                [nameof(ReplicationLatestEtagRequest.SourceUrl)] = _server.GetNodeHttpServerUrl(),
+                [nameof(ReplicationLatestEtagRequest.SourceUrl)] = this is OutgoingExternalReplicationHandler or OutgoingPullReplicationHandler
+                    ? _server.GetNodeHttpServerUrl()
+                    : _server.GetNodeClusterHttpServerUrl(),
                 [nameof(ReplicationLatestEtagRequest.SourceTag)] = _server.NodeTag,
                 [nameof(ReplicationLatestEtagRequest.SourceMachineName)] = Environment.MachineName,
                 [nameof(ReplicationLatestEtagRequest.ReplicationsType)] = GetReplicationType()

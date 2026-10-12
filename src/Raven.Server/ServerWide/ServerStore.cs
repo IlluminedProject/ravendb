@@ -285,7 +285,7 @@ namespace Raven.Server.ServerWide
             });
         }
 
-        private Lazy<ClusterRequestExecutor> CreateClusterRequestExecutor() => new(() => ClusterRequestExecutor.Create(new[] { GetNodeHttpServerUrl() }, Server.Certificate.ClientCertificate, Server.Conventions), LazyThreadSafetyMode.ExecutionAndPublication);
+        private Lazy<ClusterRequestExecutor> CreateClusterRequestExecutor() => new(() => ClusterRequestExecutor.Create(new[] { GetNodeClusterHttpServerUrl() }, Server.Certificate.ClientCertificate, Server.Conventions, usePrivateUrls: true), LazyThreadSafetyMode.ExecutionAndPublication);
 
         internal readonly FifoSemaphore ServerWideConcurrentlyRunningIndexesLock;
 
@@ -577,7 +577,10 @@ namespace Raven.Server.ServerWide
                 clusterTopology ??= GetClusterTopology();
                 url = clusterTopology.GetUrlFromTag(NodeTag);
                 if (url != null)
+                {
+                    url = GetNodeHttpServerUrl();
                     return true;
+                }
             }
 
             url = null;
@@ -920,7 +923,7 @@ namespace Raven.Server.ServerWide
             _engine = new RachisConsensus<ClusterStateMachine>(this);
             var clusterChanges = new ClusterChanges();
 
-            var myUrl = GetNodeHttpServerUrl();
+            var myUrl = GetNodeClusterHttpServerUrl();
             _engine.Initialize(_env, Configuration, clusterChanges, myUrl, Server.Time, out _lastClusterTopologyIndex, ServerShutdown);
 
             _notificationsStorage.Initialize(_env, ContextPool);
@@ -998,7 +1001,7 @@ namespace Raven.Server.ServerWide
                     }
 
                     publicUrl ??= GetNodeHttpServerUrl();
-                    privateUrl ??= Configuration.Core.ClusterServerUrl?.ToString() ?? publicUrl;
+                    privateUrl ??= GetNodeClusterHttpServerUrl();
 
                     var cmd = new UpdateServerPublishedUrlsCommand(NodeTag, publicUrl, privateUrl, Guid.NewGuid().ToString());
                     await SendToLeaderAsync(cmd);
@@ -1244,7 +1247,7 @@ namespace Raven.Server.ServerWide
 
                         if (_engine.CurrentState != RachisState.Follower)
                         {
-                            OnTopologyChangeInternal(clusterTopology, leaderClusterTopology: null, new ServerNode() { ClusterTag = NodeTag, Url = GetNodeHttpServerUrl() });
+                            OnTopologyChangeInternal(clusterTopology, leaderClusterTopology: null, new ServerNode() { ClusterTag = NodeTag, Url = GetNodeClusterHttpServerUrl() });
                             return;
                         }
 
@@ -1260,7 +1263,7 @@ namespace Raven.Server.ServerWide
                         using (var clusterRequestExecutor = CreateNewClusterRequestExecutor(leaderUrl))
                         using (ContextPool.AllocateOperationContext(out JsonOperationContext context))
                         {
-                            var command = new GetClusterTopologyCommand(NodeTag);
+                            var command = new GetClusterTopologyCommand(NodeTag, usePrivateUrls: true);
                             await clusterRequestExecutor.ExecuteAsync(command, context, token: ServerShutdown);
                             var response = command.Result;
 
@@ -3436,7 +3439,7 @@ namespace Raven.Server.ServerWide
             if (_engine.CurrentState != RachisState.Passive)
                 return;
 
-            if (_engine.Bootstrap(publicServerUrl ?? _server.ServerStore.GetNodeHttpServerUrl(), nodeTag) == false)
+            if (_engine.Bootstrap(Configuration.Core.ClusterServerUrl.HasValue ? GetNodeClusterHttpServerUrl() : publicServerUrl ?? GetNodeClusterHttpServerUrl(), nodeTag) == false)
                 return;
 
             if (skipLicenseActivation == false)
@@ -3690,7 +3693,7 @@ namespace Raven.Server.ServerWide
             if (members == null || members.Count == 0)
                 throw new InvalidOperationException("Cannot wait for execution when there are no nodes to execute on.");
 
-            using (var requestExecutor = ClusterRequestExecutor.Create(GetClusterTopology().Members.Values.ToArray(), Server.Certificate.ClientCertificate, Server.Conventions))
+            using (var requestExecutor = ClusterRequestExecutor.Create(GetClusterTopology().Members.Values.ToArray(), Server.Certificate.ClientCertificate, Server.Conventions, usePrivateUrls: true))
             using (var oct = new OperationCancelToken(cancelAfter: Configuration.Cluster.OperationTimeout.AsTimeSpan, token: ServerShutdown))
             {
                 List<Exception> exceptions = null;
@@ -3837,6 +3840,11 @@ namespace Raven.Server.ServerWide
             );
         }
 
+        public string GetNodeClusterHttpServerUrl(string clientRequestedNodeUrl = null)
+        {
+            return Configuration.Core.GetNodeClusterHttpServerUrl(clientRequestedNodeUrl ?? _server.WebUrl);
+        }
+
         public string GetNodeTcpServerUrl(string clientRequestedNodeUrl = null)
         {
             var ravenServerWebUrl = clientRequestedNodeUrl ?? _server.WebUrl;
@@ -3850,7 +3858,12 @@ namespace Raven.Server.ServerWide
         {
             UriSetting[] urls = forExternalUse ? Configuration.Core.ExternalPublicTcpServerUrl : Configuration.Core.ClusterPublicTcpServerUrl;
             if (urls == null)
-                return new[] { GetNodeTcpServerUrl(clientRequestedNodeUrl) };
+            {
+                var defaultUrl = forExternalUse || Configuration.Core.ClusterServerUrl.HasValue == false
+                    ? GetNodeTcpServerUrl(clientRequestedNodeUrl)
+                    : Configuration.Core.GetNodeClusterTcpServerUrl(clientRequestedNodeUrl ?? _server.WebUrl, _server.GetTcpServerStatus().Port);
+                return new[] { defaultUrl };
+            }
             var length = urls.Length;
             var res = new string[length];
             for (var i = 0; i < length; i++)
@@ -3863,7 +3876,7 @@ namespace Raven.Server.ServerWide
 
         public async Task<NodeConnectionTestResult> TestConnectionFromRemote(RequestExecutor requestExecutor, JsonOperationContext context, string nodeUrl)
         {
-            var myUrl = GetNodeHttpServerUrl();
+            var myUrl = GetNodeClusterHttpServerUrl();
             NodeConnectionTestResult result;
 
             var nodeConnectionTest = new TestNodeConnectionCommand(myUrl);
@@ -3899,7 +3912,7 @@ namespace Raven.Server.ServerWide
 
                 using (var cts = new CancellationTokenSource(Server.Configuration.Cluster.OperationTimeout.AsTimeSpan))
                 {
-                    connectionInfo = ReplicationUtils.GetDatabaseTcpInfoAsync(GetNodeHttpServerUrl(), url, database, "Test-Connection", Server.Certificate.ClientCertificate,
+                    connectionInfo = ReplicationUtils.GetDatabaseTcpInfoAsync(GetNodeClusterHttpServerUrl(), url, database, "Test-Connection", Server.Certificate.ClientCertificate,
                         cts.Token);
                 }
 
@@ -3949,7 +3962,8 @@ namespace Raven.Server.ServerWide
 
         public DynamicJsonValue GetTcpInfoAndCertificates(string clientRequestedNodeUrl, bool forExternalUse = false)
         {
-            var tcpServerUrl = GetNodeTcpServerUrl(clientRequestedNodeUrl);
+            var urls = GetNodeClusterTcpServerUrls(clientRequestedNodeUrl, forExternalUse);
+            var tcpServerUrl = forExternalUse || urls.Length == 0 ? GetNodeTcpServerUrl(clientRequestedNodeUrl) : urls[0];
             if (tcpServerUrl.StartsWith("tcp://localhost.fiddler:", StringComparison.OrdinalIgnoreCase))
                 tcpServerUrl = tcpServerUrl.Remove(15, 8);
 
@@ -3961,7 +3975,6 @@ namespace Raven.Server.ServerWide
                 [nameof(TcpConnectionInfo.ServerId)] = ServerId.ToString()
             };
 
-            var urls = GetNodeClusterTcpServerUrls(clientRequestedNodeUrl, forExternalUse);
             var array = new DynamicJsonArray();
             foreach (var url in urls)
             {

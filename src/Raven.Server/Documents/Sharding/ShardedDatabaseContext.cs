@@ -168,7 +168,7 @@ namespace Raven.Server.Documents.Sharding
                         {
                             _ = re.Value.UpdateTopologyAsync(
                                 new RequestExecutor.UpdateTopologyParameters(
-                                        new ServerNode() { ClusterTag = ServerStore.NodeTag, Database = ShardHelper.ToShardName(DatabaseName, shardNumber), Url = ServerStore.GetNodeHttpServerUrl() })
+                                        new ServerNode() { ClusterTag = ServerStore.NodeTag, Database = ShardHelper.ToShardName(DatabaseName, shardNumber), Url = ServerStore.GetNodeClusterHttpServerUrl() })
                                 { DebugTag = "shard-topology-update" });
                         }
                     }

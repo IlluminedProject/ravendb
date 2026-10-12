@@ -1717,7 +1717,7 @@ namespace Raven.Server.Documents
                         {
                             ClusterTag = _serverStore.NodeTag,
                             Database = Name,
-                            Url = ServerStore.GetNodeHttpServerUrl()
+                            Url = ServerStore.GetNodeClusterHttpServerUrl()
                         })
                         {
                             DebugTag = "database-topology-update"
@@ -2046,8 +2046,8 @@ namespace Raven.Server.Documents
 
         private Lazy<RequestExecutor> CreateRequestExecutor() =>
             new(
-                () => RequestExecutor.CreateForProxy(new[] { ServerStore.Configuration.Core.GetNodeHttpServerUrl(ServerStore.Server.WebUrl) }, Name,
-                    ServerStore.Server.Certificate.ClientCertificate, DocumentConventions.DefaultForServer), LazyThreadSafetyMode.ExecutionAndPublication);
+                () => RequestExecutor.CreateForProxy(new[] { ServerStore.GetNodeClusterHttpServerUrl() }, Name,
+                    ServerStore.Server.Certificate.ClientCertificate, DocumentConventions.DefaultForServer, usePrivateUrls: true), LazyThreadSafetyMode.ExecutionAndPublication);
 
         internal void HandleNonDurableFileSystemError(object sender, NonDurabilitySupportEventArgs e)
         {
