@@ -3693,13 +3693,18 @@ namespace Raven.Server.ServerWide
             if (members == null || members.Count == 0)
                 throw new InvalidOperationException("Cannot wait for execution when there are no nodes to execute on.");
 
+            // The local command execution was already checked above, without requiring a reachable cluster URL.
+            if (members.All(member => member == NodeTag))
+                return;
+
             using (var requestExecutor = ClusterRequestExecutor.Create(GetClusterTopology().Members.Values.ToArray(), Server.Certificate.ClientCertificate, Server.Conventions, usePrivateUrls: true))
             using (var oct = new OperationCancelToken(cancelAfter: Configuration.Cluster.OperationTimeout.AsTimeSpan, token: ServerShutdown))
             {
                 List<Exception> exceptions = null;
 
                 var waitingTasks =
-                    members.Select(member => WaitForRaftIndexOnNodeAndReturnIfExceptionAsync(requestExecutor, member, index, context, oct.Token));
+                    members.Where(member => member != NodeTag)
+                        .Select(member => WaitForRaftIndexOnNodeAndReturnIfExceptionAsync(requestExecutor, member, index, context, oct.Token));
 
                 foreach (var exception in await Task.WhenAll(waitingTasks))
                 {

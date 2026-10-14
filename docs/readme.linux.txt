@@ -62,6 +62,9 @@ external replication settings. Without ServerUrl.Cluster, existing defaults appl
 Use the cluster HTTP URL when adding a node to the cluster. Existing multi-node cluster
 topology URLs must already use reachable cluster addresses; startup only updates a
 single-node topology automatically.
+Local Raft execution is checked directly rather than through the node's advertised HTTP
+address. Initial database creation therefore does not require the cluster interface to
+exist; remote member execution checks still use cluster HTTP addresses.
 
 * Fork Cluster Capacity
 This fork does not enforce license limits on distributed cluster membership, cluster
