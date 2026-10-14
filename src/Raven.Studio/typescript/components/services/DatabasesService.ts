@@ -68,6 +68,7 @@ import seedIdentityCommand from "commands/database/identities/seedIdentityComman
 import getRevisionsBinCleanerConfigurationCommand from "commands/database/settings/getRevisionsBinCleanerConfigurationCommand";
 import saveRevisionsBinCleanerConfigurationCommand from "commands/database/settings/saveRevisionsBinCleanerConfigurationCommand";
 import deleteDocumentsCommand from "commands/database/documents/deleteDocumentsCommand";
+import getDocumentsWithMetadataCommand from "commands/database/documents/getDocumentsWithMetadataCommand";
 import deleteCollectionCommand from "commands/database/documents/deleteCollectionCommand";
 import getDatabaseSettingsCommand = require("commands/database/settings/getDatabaseSettingsCommand");
 import getRevisionsPreviewCommand from "commands/database/documents/getRevisionsPreviewCommand";
@@ -81,6 +82,8 @@ import getSchemaValidationCommand from "commands/database/settings/getSchemaVali
 import saveSchemaValidationCommand from "commands/database/settings/saveSchemaValidationCommand";
 import validateSchemaCommand from "commands/database/settings/validateSchemaCommand";
 import getRemoteAttachmentsDestinationsCommand from "commands/database/settings/getRemoteAttachmentsDestinationsCommand";
+import getCompareExchangeItemsCommand from "commands/database/cmpXchg/getCompareExchangeItemsCommand";
+import deleteCompareExchangeItemCommand from "commands/database/cmpXchg/deleteCompareExchangeItemCommand";
 
 export default class DatabasesService {
     async setLockMode(databaseNames: string[], newLockMode: DatabaseLockMode) {
@@ -207,12 +210,8 @@ export default class DatabasesService {
         return new saveRevisionsBinCleanerConfigurationCommand(...args).execute();
     }
 
-    async enforceRevisionsConfiguration(
-        databaseName: string,
-        includeForceCreated = false,
-        collections: string[] = null
-    ) {
-        return new enforceRevisionsConfigurationCommand(databaseName, includeForceCreated, collections).execute();
+    async enforceRevisionsConfiguration(...args: ConstructorParameters<typeof enforceRevisionsConfigurationCommand>) {
+        return new enforceRevisionsConfigurationCommand(...args).execute();
     }
 
     async revertRevisions(databaseName: string, dto: Raven.Server.Documents.Revisions.RevertRevisionsRequest) {
@@ -367,6 +366,10 @@ export default class DatabasesService {
         return new getDocumentWithMetadataCommand(...args).execute();
     }
 
+    async getDocumentsWithMetadata(...args: ConstructorParameters<typeof getDocumentsWithMetadataCommand>) {
+        return new getDocumentsWithMetadataCommand(...args).execute();
+    }
+
     async getRemoteAttachmentsConfiguration(
         ...args: ConstructorParameters<typeof getRemoteAttachmentsConfigurationCommand>
     ) {
@@ -395,5 +398,13 @@ export default class DatabasesService {
 
     async validateSchema(...args: ConstructorParameters<typeof validateSchemaCommand>) {
         return new validateSchemaCommand(...args).execute();
+    }
+
+    async getCompareExchangeItems(...args: ConstructorParameters<typeof getCompareExchangeItemsCommand>) {
+        return new getCompareExchangeItemsCommand(...args).execute();
+    }
+
+    async deleteCompareExchangeItem(...args: ConstructorParameters<typeof deleteCompareExchangeItemCommand>) {
+        return new deleteCompareExchangeItemCommand(...args).execute();
     }
 }

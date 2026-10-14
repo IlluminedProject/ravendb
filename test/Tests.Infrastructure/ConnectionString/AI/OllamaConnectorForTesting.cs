@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Raven.Client.Documents.Operations.AI;
 
 namespace Tests.Infrastructure.ConnectionString.AI;
@@ -6,39 +6,49 @@ namespace Tests.Infrastructure.ConnectionString.AI;
 public class EmbeddingsOllamaConnectorForTesting : AbstractEmbeddingsConnectorForTesting<EmbeddingsOllamaConnectorForTesting>
 {
     public const string Model = "nomic-embed-text:latest";
-    public const string EnvironmentVariable = "RAVEN_AI_INTEGRATION_OLLAMA_EMB_URI";
 
     public EmbeddingsOllamaConnectorForTesting()
     {
-        RequiredEnvironmentVariables = [EnvironmentVariable];
+        RequiredEnvironmentVariables = [RavenTestHelper.EnvironmentVariables.AiIntegrationOllamaEmbUriEnvName];
     }
 
     public override AiConnectorType AiConnectorType { get; init; } = AiConnectorType.Ollama;
 
-    protected override AiConnectionString CreateAiConnectionStringImpl() => OllamaConnectorHelper.CreateAiConnectionString(Model, AiModelType.TextEmbeddings, EnvironmentVariable);
+    protected override AiConnectionString CreateAiConnectionStringImpl() => OllamaConnectorHelper.CreateAiConnectionString(Model, AiModelType.TextEmbeddings, RavenTestHelper.EnvironmentVariables.AiIntegrationOllamaEmbUri);
 }
 
 public class GenAiOllamaConnectorForTesting : AbstractGenAiConnectorForTesting<GenAiOllamaConnectorForTesting>
 {
     public const string Model = "qwen2.5:0.5b";
-    public const string EnvironmentVariable = "RAVEN_AI_INTEGRATION_OLLAMA_CHAT_URI";
 
     public GenAiOllamaConnectorForTesting()
     {
-        RequiredEnvironmentVariables = [EnvironmentVariable];
+        RequiredEnvironmentVariables = [RavenTestHelper.EnvironmentVariables.AiIntegrationOllamaChatUriEnvName];
     }
 
     public override AiConnectorType AiConnectorType { get; init; } = AiConnectorType.Ollama;
 
-    protected override AiConnectionString CreateAiConnectionStringImpl() => OllamaConnectorHelper.CreateAiConnectionString(Model, AiModelType.Chat, EnvironmentVariable);
+    // The first request also loads the model into the GPU, which can take far longer than a hosted provider
+    // needs to answer. Only this connector waits that long.
+    protected override TimeSpan ConnectionProbeTimeout => TimeSpan.FromSeconds(120);
+
+    public override GenAiConfiguration GetAiConfiguration()
+    {
+        var configuration = base.GetAiConfiguration();
+
+        // A single local GPU serializes completions; parallel requests just accumulate wait time until they time out.
+        configuration.MaxConcurrency = 1;
+
+        return configuration;
+    }
+
+    protected override AiConnectionString CreateAiConnectionStringImpl() => OllamaConnectorHelper.CreateAiConnectionString(Model, AiModelType.Chat, RavenTestHelper.EnvironmentVariables.AiIntegrationOllamaChatUri);
 }
 
 internal static class OllamaConnectorHelper
 {
-    public static AiConnectionString CreateAiConnectionString(string model, AiModelType modelType, string environmentVariable)
+    public static AiConnectionString CreateAiConnectionString(string model, AiModelType modelType, string uri)
     {
-        var uri = Environment.GetEnvironmentVariable(environmentVariable);
-
         return new AiConnectionString
         {
             ModelType = modelType,

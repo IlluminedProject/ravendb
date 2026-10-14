@@ -67,7 +67,10 @@ namespace Raven.Server.Web.System
                 var clusterTopology = ServerStore.GetClusterTopology();
                 foreach (var node in nodes)
                 {
-                    output.Add(clusterTopology.GetUrlFromTag(node));
+                    var url = ServerStore.PublishedServerUrls != null && ServerStore.PublishedServerUrls.Urls.TryGetValue(node, out var publishedUrls)
+                        ? publishedUrls.PublicUrl
+                        : null;
+                    output.Add(url ?? clusterTopology.GetUrlFromTag(node));
                 }
                 context.Write(writer, new DynamicJsonValue
                 {

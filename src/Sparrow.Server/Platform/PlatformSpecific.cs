@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -22,6 +23,13 @@ namespace Sparrow.Server.Platform
                     return CheckPageFileOnHdd.PosixIsSwappingOnHddInsteadOfSsd();
                 return CheckPageFileOnHdd.WindowsIsSwappingOnHddInsteadOfSsd();
             }
+
+            public static List<(string DeviceName, Size ReadAheadValue)> GetBlockDevicesWithHighReadAhead(int thresholdKb)
+            {
+                if (PlatformDetails.RunningOnPosix == false || PlatformDetails.RunningOnMacOsx)
+                    return null;
+                return CheckBlockDeviceKernelSettings.GetBlockDevicesWithHighReadAhead(thresholdKb);
+            }
         }
 
         public static class NativeMemory
@@ -40,7 +48,7 @@ namespace Sparrow.Server.Platform
                     // we pass NULL (IntPtr.Zero) as the first parameter (address / start) so the kernel chooses the(page-aligned) address at which to create the mapping
 
                     var pageAlignedMemory = Syscall.mmap64(IntPtr.Zero, (UIntPtr)size, MmapProts.PROT_READ | MmapProts.PROT_WRITE,
-                        MmapFlags.MAP_PRIVATE | MmapFlags.MAP_ANONYMOUS, -1, 0L);
+                        MmapFlags.MAP_PRIVATE | PerPlatformValues.MmapFlags.MAP_ANONYMOUS, -1, 0L);
 
                     if (pageAlignedMemory.ToInt64() == -1)
                     {
@@ -56,7 +64,7 @@ namespace Sparrow.Server.Platform
                     Win32MemoryProtectMethods.MemoryProtection.READWRITE);
 
                 if (allocate4KbAlignedMemory == null)
-                    ThrowFailedToAllocate();
+                    ThrowFailedToAllocate(size);
 
                 return allocate4KbAlignedMemory;
             }
@@ -87,9 +95,10 @@ namespace Sparrow.Server.Platform
             }
 
             [DoesNotReturn]
-            private static void ThrowFailedToAllocate()
+            private static void ThrowFailedToAllocate(long size)
             {
-                throw new Win32Exception("Could not allocate memory");
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(error, $"Could not allocate memory (allocation size: {size} bytes). {Marshal.GetPInvokeErrorMessage(error)}");
             }
 
             [DoesNotReturn]

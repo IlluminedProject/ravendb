@@ -3,7 +3,6 @@ import { Icon } from "components/common/Icon";
 import { FlexGrow } from "components/common/FlexGrow";
 import "./ClusterDebugSummary.scss";
 import classNames from "classnames";
-import { nodeAwareLoadableData } from "hooks/useClusterWideAsync";
 import { useAppSelector } from "components/store";
 import { clusterSelectors } from "components/common/shell/clusterSlice";
 import endpoints from "endpoints";
@@ -24,6 +23,7 @@ import Button from "react-bootstrap/Button";
 import PopoverWithHoverWrapper from "components/common/PopoverWithHoverWrapper";
 import ProgressBar from "react-bootstrap/ProgressBar";
 import { EmptySet } from "components/common/EmptySet";
+import { nodeAwareLoadableData } from "components/models/common";
 
 interface ClusterDebugSummaryProps {
     nodes: nodeAwareLoadableData<ClusterDebugNodeInfo>[];
@@ -151,6 +151,24 @@ export default function ClusterDebugSummary(props: ClusterDebugSummaryProps) {
                             </PopoverWithHoverWrapper>
                         </th>
                         {nodes.map((node) => {
+                            if (node.status === "failure") {
+                                return (
+                                    <td
+                                        rowSpan={hasAnyCriticalError ? 9 : 8}
+                                        className="align-content-center"
+                                        key={node.nodeTag}
+                                    >
+                                        <EmptySet color="danger" icon="warning">
+                                            <span>Unable to connect</span>
+                                            <br />
+                                            <small className="text-muted">
+                                                There was connection issue with{" "}
+                                                <Icon icon="node" addon="warning" margin="ms-1 me-1" /> {node.nodeTag}
+                                            </small>
+                                        </EmptySet>
+                                    </td>
+                                );
+                            }
                             return (
                                 <ConditionalRender node={node} key={node.nodeTag}>
                                     {() => {
@@ -188,30 +206,12 @@ export default function ClusterDebugSummary(props: ClusterDebugSummaryProps) {
                             </PopoverWithHoverWrapper>
                         </th>
                         {nodes.map((node) => {
-                            if (node.status === "failure") {
-                                return (
-                                    <td
-                                        rowSpan={hasAnyCriticalError ? 9 : 8}
-                                        className="align-content-center"
-                                        key={node.nodeTag}
-                                    >
-                                        <EmptySet color="danger" icon="warning">
-                                            <span>Unable to connect</span>
-                                            <br />
-                                            <small className="text-muted">
-                                                There was connection issue with{" "}
-                                                <Icon icon="node" addon="warning" margin="ms-1 me-1" /> {node.nodeTag}
-                                            </small>
-                                        </EmptySet>
-                                    </td>
-                                );
-                            }
-
                             return (
                                 <ConditionalRender node={node} key={node.nodeTag}>
                                     {() => (
                                         <PopoverWithHoverWrapper
                                             inline={false}
+                                            targetStyle={{ width: "100%" }}
                                             message={
                                                 <>
                                                     First entry index:{" "}

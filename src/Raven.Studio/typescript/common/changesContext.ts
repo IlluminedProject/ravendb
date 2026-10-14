@@ -20,21 +20,13 @@ class changesContext {
     databaseNotifications = ko.observable<databaseNotificationCenterClient>();
 
     databaseChangesApi = ko.observable<changesApi>();
+    private currentDatabaseChangesApi: changesApi = null;
     private pendingAfterChangesApiConnectedHandlers: Array<() => void> = [];
     private hasChangesApiConnected = false;
 
     private globalDatabaseSubscriptions: changeSubscription[] = [];
 
     constructor() {
-        window.addEventListener("unload", () => {
-            this.disconnectFromDatabaseChangesApi("ChangingDatabase");
-            this.serverNotifications().dispose();
-
-            if (this.databaseNotifications()) {
-                this.databaseNotifications().dispose();
-            }
-        });
-
         this.databaseChangesApi.subscribe(newValue => {
             if (!newValue) {
                 this.hasChangesApiConnected = false;
@@ -69,9 +61,9 @@ class changesContext {
     }
 
     changeDatabase(db: database): void {
-        const currentChanges = this.databaseChangesApi();
+        const currentChanges = this.currentDatabaseChangesApi;
         if (currentChanges && currentChanges.getDatabase().name === db.name) {
-            // nothing to do - already connected to requested changes api
+            // nothing to do - already connected (or connecting) to requested changes api
             return;
         }
 
@@ -89,7 +81,12 @@ class changesContext {
         this.globalDatabaseSubscriptions.push(...notificationCenter.instance.configureForDatabase(notificationsClient));
 
         const newChanges = new changesApi(db);
+        this.currentDatabaseChangesApi = newChanges;
         newChanges.connectToWebSocketTask.done(() => {
+            if (this.currentDatabaseChangesApi !== newChanges) {
+                return;
+            }
+
             this.databaseChangesApi(newChanges);
             this.navigateToResourceSpecificPage(db);
         });
@@ -119,13 +116,15 @@ class changesContext {
     }
 
     private disconnectFromDatabaseChangesApi(cause: databaseDisconnectionCause) {
-        const currentChanges = this.databaseChangesApi();
-        if (currentChanges) {
-            currentChanges.dispose();
+        this.currentDatabaseChangesApi?.dispose();
+        this.currentDatabaseChangesApi = null;
+
+        const connectedChanges = this.databaseChangesApi();
+        if (connectedChanges) {
             this.databaseChangesApi(null);
 
             const args: databaseDisconnectedEventArgs = {
-                databaseName: currentChanges.getDatabase().name, 
+                databaseName: connectedChanges.getDatabase().name,
                 cause
             };
             ko.postbox.publish(EVENTS.Database.Disconnect, args);
@@ -133,7 +132,7 @@ class changesContext {
     }
 
     disconnectIfCurrent(db: database | databases.DatabaseSharedInfo, cause: databaseDisconnectionCause) {
-        const currentChanges = this.databaseChangesApi();
+        const currentChanges = this.currentDatabaseChangesApi;
 
         if (currentChanges && currentChanges.getDatabase().name === db.name) {
             this.disconnect(cause);

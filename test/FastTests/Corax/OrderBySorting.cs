@@ -26,20 +26,22 @@ namespace FastTests.Corax
         {
         }
 
-        [RavenFact(RavenTestCategory.Corax)]
-        public void OrderByNumber()
+        [RavenTheory(RavenTestCategory.Corax)]
+        [InlineData(BitmapAndFillMode.Off)]
+        [InlineData(BitmapAndFillMode.Force)]
+        public void OrderByNumber(BitmapAndFillMode bitmapAndFillMode)
         {
             PrepareData();
             IndexEntries();
             longList.Sort(CompareDescending);
-            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator));
+            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator)) { BitmapAndFillMode = bitmapAndFillMode };
             {
                 var allEntries = searcher.AllEntries();
                 var match1 = searcher.StartWithQuery("Id", "l");
                 var concat = searcher.And(allEntries, match1);
 
                 var match = searcher.OrderBy(concat,
-                    new OrderMetadata(searcher.FieldMetadataBuilder("Content", ContentId), false, MatchCompareFieldType.Integer, fieldHasNoTerms: false), nullFirst: true);
+                    new OrderMetadata(searcher.FieldMetadataBuilder("Content", ContentId), false, MatchCompareFieldType.Integer, fieldHasNoTerms: false), defaultNullsSortMode: NullsSortMode.NullsSmallest);
 
                 List<string> sortedByCorax = new();
                 Span<long> ids = stackalloc long[2048];

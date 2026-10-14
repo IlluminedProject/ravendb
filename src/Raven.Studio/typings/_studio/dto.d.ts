@@ -66,6 +66,13 @@ interface changeVectorItem {
     shortFormat: string;
 }
 
+interface changeVectorEntryItem {
+    tag: string;
+    etag: string;
+    dbId: string;
+    original: string;
+}
+
 interface IndexErrorPerDocument {
     Document: string;
     Error: string;
@@ -73,7 +80,6 @@ interface IndexErrorPerDocument {
     IndexName: string;
     Timestamp: string;
     LocalTime: string;
-    RelativeTime: string;
 }
 
 interface revisionTimeSeriesDto {
@@ -218,6 +224,17 @@ interface canDeactivateResultDto {
 
 interface confirmDialogResult {
     can: boolean;
+}
+
+type attachmentUploadStatus = "uploading" | "uploaded" | "failed" | "skipped" | "cancelled";
+
+interface attachmentUploadProgress {
+    position: number;
+    count: number;
+    fileName: string;
+    status: attachmentUploadStatus;
+    loaded: number;
+    total: number;
 }
 
 interface disableDatabaseResult {
@@ -401,6 +418,7 @@ declare module studio.settings {
     type numberFormatting = "raw" | "formatted";
     type dontShowAgain = "UnsupportedBrowser";
     type saveLocation = "local" | "remote";
+    type ongoingTaskDisplayMode = "expanded" | "compact";
 }
 
 interface IndexingPerformanceStatsWithCache extends Raven.Client.Documents.Indexes.IndexingPerformanceStats {
@@ -418,7 +436,7 @@ interface IOMetricsRecentStatsWithCache extends Raven.Server.Utils.IoMetrics.IOM
 
 type subscriptionType =  "SubscriptionConnection" | "SubscriptionBatch" | "AggregatedBatchesInfo";
 
-type ongoingTaskStatType = Raven.Server.Documents.Replication.Stats.LiveReplicationPerformanceCollector.ReplicationPerformanceType | StudioEtlType | subscriptionType | StudioQueueSinkType;
+type ongoingTaskStatType = Raven.Server.Documents.Replication.Stats.LiveReplicationPerformanceCollector.ReplicationPerformanceType | StudioEtlType | subscriptionType | StudioQueueSinkType | "CdcSink";
 
 interface ReplicationPerformanceBaseCache {
     StartedAsDate: Date;
@@ -448,6 +466,15 @@ interface QueueSinkPerformanceBaseWithCache extends Raven.Server.Documents.Queue
     HasScriptErrors: boolean;
     HasReadErrors: boolean;
     Type: StudioQueueSinkType;
+}
+
+interface CdcSinkPerformanceBaseWithCache extends Raven.Server.Documents.CdcSink.Stats.Performance.CdcSinkPerformanceStats {
+    StartedAsDate: Date;
+    CompletedAsDate: Date;
+    HasErrors: boolean;
+    HasScriptErrors: boolean;
+    HasReadErrors: boolean;
+    Type: "CdcSink";
 }
 
 interface SubscriptionConnectionPerformanceStatsWithCache extends Raven.Server.Documents.Subscriptions.Stats.SubscriptionConnectionPerformanceStats {
@@ -661,6 +688,7 @@ interface explainQueryResponse extends resultsDto<Raven.Server.Documents.Queries
 
 interface virtualBulkOperationItem {
     id: string;
+    operationId: number;
     date: string;
     duration: number;
     totalItemsProcessed: number;
@@ -672,6 +700,7 @@ interface virtualBulkOperationItem {
 
 interface virtualBulkOperationFailureItem {
     id: string;
+    operationId: number;
     date: string;
     duration: number;
     errorMsg: string;
@@ -696,36 +725,11 @@ interface adminLogsConfiguration extends Raven.Client.ServerWide.Operations.Logs
     CurrentMode: Sparrow.Logging.LogMode;
 }
 
-interface testEtlScriptResult {
-    DebugOutput: Array<string>;
-    TransformationErrors: Array<Raven.Server.NotificationCenter.Notifications.Details.EtlErrorInfo>;
-}
-
-declare module Raven.Server.Documents.ETL.Providers.RelationalDatabase.Common.Test {
-    interface RelationalDatabaseEtlTestScriptResult extends testEtlScriptResult {
-    }
-}
-
 interface RavenEtlTestScriptResult extends Raven.Server.Documents.ETL.Test.TestEtlScriptResult {
     Commands: Array<Raven.Client.Documents.Commands.Batches.ICommandData>;
 }
 
 interface TestRavenEtlScript extends Raven.Server.Documents.ETL.Test.TestEtlScript<Raven.Client.Documents.Operations.ETL.RavenEtlConfiguration, Raven.Client.Documents.Operations.ETL.RavenConnectionString> {
-}
-
-declare module Raven.Server.Documents.ETL.Providers.OLAP.Test {
-    interface OlapEtlTestScriptResult extends testEtlScriptResult {
-    }
-}
-
-declare module Raven.Server.Documents.ETL.Providers.ElasticSearch.Test {
-    interface ElasticSearchEtlTestScriptResult extends testEtlScriptResult {
-    }
-}
-
-declare module Raven.Server.Documents.ETL.Providers.Queue.Test {
-    interface QueueEtlTestScriptResult extends testEtlScriptResult {
-    }
 }
 
 type backupOptions = "None" | "Local" | "Azure" | "AmazonGlacier" | "AmazonS3" | "FTP" | "GoogleCloud";
@@ -807,7 +811,6 @@ interface confirmationDialogOptions {
     defaultOption?: string;
     html?: boolean;
     wideDialog?: boolean;
-    isCancelHidden?: boolean;
 }
 
 type IndexEntriesFieldType = "Static" | "Dynamic";
@@ -931,15 +934,15 @@ interface TimeSeriesOperation extends Raven.Client.Documents.Operations.TimeSeri
 }
 
 type StudioTaskType = "Replication" | "PullReplicationAsHub" | "PullReplicationAsSink" | "Backup" | "Subscription" |
-    "RavenEtl" | "SqlEtl" | "SnowflakeEtl" | "OlapEtl" | "ElasticSearchEtl" | 
+    "RavenEtl" | "SqlEtl" | "SnowflakeEtl" | "OlapEtl" | "ElasticSearchEtl" |
     "KafkaQueueEtl" | "RabbitQueueEtl" | "AzureQueueStorageQueueEtl" | "AmazonSqsQueueEtl" |
-    "KafkaQueueSink" | "RabbitQueueSink" | "EmbeddingsGeneration" | "GenAi";
+    "KafkaQueueSink" | "RabbitQueueSink" | "AzureServiceBusQueueSink" | "CdcSink" | "EmbeddingsGeneration" | "GenAi";
 
 type StudioEtlType = "Raven" | "Sql" | "Snowflake" | "Olap" | "ElasticSearch" | "Kafka" | "RabbitMQ" | "AzureQueueStorage" | "AmazonSqs" | "EmbeddingsGeneration" | "GenAi";
 
-type StudioQueueSinkType = "KafkaQueueSink" | "RabbitQueueSink";
+type StudioQueueSinkType = "KafkaQueueSink" | "RabbitQueueSink" | "AzureServiceBusQueueSink";
 
-type FilterOngoingTaskType = Raven.Client.Documents.Operations.ETL.EtlType  | Raven.Client.Documents.Operations.ETL.Queue.QueueBrokerType | "Subscription" | "Replication";
+type FilterOngoingTaskType = Raven.Client.Documents.Operations.ETL.EtlType  | Raven.Client.Documents.Operations.ETL.Queue.QueueBrokerType | "Subscription" | "Replication" | "CdcSink";
 
 type TaskDestinationType = "Collection" | "Table" | "Queue" | "Topic" | "Index";
 
@@ -1076,6 +1079,8 @@ interface ReactInKnockoutOptions<T> {
     component: T;
     props?: Parameters<T>[0];
     dirtyFlag?: ReactDirtyFlag;
+    isPageView?: boolean;
+    databaseName?: string;
 }
 
 type ReactInKnockout<T> = KnockoutComputed<ReactInKnockoutOptions<T>>;
@@ -1112,6 +1117,10 @@ type TombstonesStateOnWire = Omit<Raven.Server.Documents.TombstoneCleaner.Tombst
 // Server ToJson() method converts the version object to a string
 type LicenseStatus = Omit<Raven.Server.Commercial.LicenseStatus, "Version"> & { Version: string };
 
+type UserDomainsAndLicenseInfo = Omit<Raven.Server.Commercial.UserDomainsAndLicenseInfo, "LicenseStatus"> & {
+    LicenseStatus: LicenseStatus;
+};
+
 
 type SqlConnectionStringFactoryName =
     | "Microsoft.Data.SqlClient"
@@ -1128,6 +1137,7 @@ type GetConnectionStringsResult = Omit<Raven.Client.Documents.Operations.Connect
 
 type AzureQueueStorageAuthenticationType = "connectionString" | "entraId" | "passwordless";
 type AmazonSqsAuthenticationType = "basic" | "passwordless";
+type AzureServiceBusAuthenticationType = "connectionString" | "entraId" | "passwordless";
 
 type CertificateDto = Partial<Raven.Client.ServerWide.Operations.Certificates.CertificateDefinition> & { HasTwoFactor?: boolean; }
 

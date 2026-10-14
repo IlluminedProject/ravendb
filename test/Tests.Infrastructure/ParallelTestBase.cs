@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -24,6 +24,7 @@ public class ParallelTestBase : LinuxRaceConditionWorkAround, IAsyncLifetime
     private const string XunitConfigurationFile = "xunit.runner.json";
 
     private static readonly SemaphoreSlim ConcurrentTestsSemaphore;
+    private static readonly int MaxNumberOfConcurrentTests;
     private readonly MultipleUseFlag _concurrentTestsSemaphoreTaken = new();
 
     static ParallelTestBase()
@@ -32,8 +33,8 @@ public class ParallelTestBase : LinuxRaceConditionWorkAround, IAsyncLifetime
 
         var maxNumberOfConcurrentTests = Math.Max(ProcessorInfo.ProcessorCount / 2, 2);
 
-        if (int.TryParse(Environment.GetEnvironmentVariable("RAVEN_MAX_RUNNING_TESTS"), out var maxRunningTests))
-            maxNumberOfConcurrentTests = maxRunningTests;
+        if (RavenTestHelper.EnvironmentVariables.HasMaxRunningTests)
+            maxNumberOfConcurrentTests = RavenTestHelper.EnvironmentVariables.MaxRunningTests;
         else
         {
             var fileInfo = new FileInfo(XunitConfigurationFile);
@@ -53,12 +54,10 @@ public class ParallelTestBase : LinuxRaceConditionWorkAround, IAsyncLifetime
         }
 
         Console.WriteLine("Max number of concurrent tests is: " + maxNumberOfConcurrentTests);
+        MaxNumberOfConcurrentTests = maxNumberOfConcurrentTests;
         ConcurrentTestsSemaphore = new SemaphoreSlim(maxNumberOfConcurrentTests, maxNumberOfConcurrentTests);
 
-        if (bool.TryParse(Environment.GetEnvironmentVariable("RAVEN_WRITE_RUNNING_TESTS_TO_FILE"), out var writeToFile))
-        {
-            WriteToFile = writeToFile;
-        }
+        WriteToFile = RavenTestHelper.EnvironmentVariables.WriteRunningTestsToFile;
 
         if (WriteToFile)
         {
@@ -101,5 +100,37 @@ public class ParallelTestBase : LinuxRaceConditionWorkAround, IAsyncLifetime
 
         if (_concurrentTestsSemaphoreTaken.Lower())
             ConcurrentTestsSemaphore.Release();
+    }
+
+    protected bool TryExecuteWhenNoOtherTestsAreRunning(Action action)
+    {
+        if (action == null)
+            throw new ArgumentNullException(nameof(action));
+
+        if (_concurrentTestsSemaphoreTaken.IsRaised() == false)
+            return false;
+
+        var acquired = 0;
+        try
+        {
+            for (var i = 1; i < MaxNumberOfConcurrentTests; i++)
+            {
+                if (ConcurrentTestsSemaphore.Wait(0) == false)
+                    return false;
+
+                acquired++;
+            }
+
+            action();
+            return true;
+        }
+        finally
+        {
+            while (acquired > 0)
+            {
+                ConcurrentTestsSemaphore.Release();
+                acquired--;
+            }
+        }
     }
 }

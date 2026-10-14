@@ -11,7 +11,7 @@ using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Http;
 using Raven.Client.Json;
-using Raven.Server.Web.System;
+using Raven.Server.Documents.AI;
 using Sparrow.Json;
 using Tests.Infrastructure;
 using Xunit;
@@ -24,7 +24,7 @@ namespace SlowTests.Server.Documents.AI
         {
         }
 
-        [RavenTheory(RavenTestCategory.Ai)]
+        [RavenRetryTheory(RavenTestCategory.Ai, maxRetries: 3, delayBetweenRetriesMs: 10_000)]
         [ClassData(typeof(IntegrationDataType<GenAi>))]
         public void CanConnectGenAi(RavenAiIntegration integration)
         {
@@ -36,7 +36,7 @@ namespace SlowTests.Server.Documents.AI
             }
         }
 
-        [RavenMultiplatformTheory(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+        [RavenTheory(RavenTestCategory.Ai)]
         [ClassData(typeof(IntegrationDataType<Embeddings>))]
         public void CanConnectEmbeddings(RavenAiIntegration integration)
         {
@@ -61,7 +61,7 @@ namespace SlowTests.Server.Documents.AI
             }
         }
 
-        [RavenMultiplatformTheory(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+        [RavenTheory(RavenTestCategory.Ai)]
         [RavenAiEmbeddingsData(IntegrationType = RavenAiIntegration.All, DatabaseMode = RavenDatabaseMode.Single)]
         public void CanTestAiEmbeddingsConnectionString(Options options, EmbeddingsGenerationConfiguration configuration)
         {
@@ -115,7 +115,7 @@ namespace SlowTests.Server.Documents.AI
         {
         }
 
-        private class TestAiConnectionStringOperation : IMaintenanceOperation<NodeConnectionTestResult>
+        internal class TestAiConnectionStringOperation : IMaintenanceOperation<AiConnectionTestResult>
         {
             private readonly AiConnectionString _connectionString;
 
@@ -124,12 +124,12 @@ namespace SlowTests.Server.Documents.AI
                 _connectionString = connectionString;
             }
 
-            public RavenCommand<NodeConnectionTestResult> GetCommand(DocumentConventions conventions, JsonOperationContext context)
+            public RavenCommand<AiConnectionTestResult> GetCommand(DocumentConventions conventions, JsonOperationContext context)
             {
                 return new TestAiConnectionStringCommand(_connectionString);
             }
 
-            private class TestAiConnectionStringCommand : RavenCommand<NodeConnectionTestResult>
+            private class TestAiConnectionStringCommand : RavenCommand<AiConnectionTestResult>
             {
                 private readonly AiConnectionString _connectionString;
 
@@ -155,14 +155,14 @@ namespace SlowTests.Server.Documents.AI
                 }
 
 
-                private static Func<BlittableJsonReaderObject, NodeConnectionTestResult> NodeConnectionTestResult = JsonDeserializationBase.GenerateJsonDeserializationRoutine<NodeConnectionTestResult>();
+                private static Func<BlittableJsonReaderObject, AiConnectionTestResult> AiConnectionTestResult = JsonDeserializationBase.GenerateJsonDeserializationRoutine<AiConnectionTestResult>();
 
                 public override void SetResponse(JsonOperationContext context, BlittableJsonReaderObject response, bool fromCache)
                 {
                     if (response == null)
                         throw new InvalidOperationException("Response is null");
 
-                    Result = NodeConnectionTestResult(response);
+                    Result = AiConnectionTestResult(response);
                 }
             }
         }

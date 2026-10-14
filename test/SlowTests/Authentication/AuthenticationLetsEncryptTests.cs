@@ -34,6 +34,7 @@ using Raven.Client.Json;
 using Raven.Server.ServerWide;
 using Raven.Client.Util;
 using System.Threading;
+using Sparrow.Platform;
 
 namespace SlowTests.Authentication
 {
@@ -301,6 +302,11 @@ namespace SlowTests.Authentication
             // It only works because in the TestBase ctor we do:
             // RequestExecutor.ServerCertificateCustomValidationCallback += (msg, cert, chain, errors) => true;
 
+            // Pebble doesn't backdate NotBefore, so a clock skew between the ACME server and machine running the test can make the cert not yet valid
+            var notYetValidFor = serverCert.NotBefore.ToUniversalTime() - DateTime.UtcNow;
+            if (notYetValidFor > TimeSpan.Zero)
+                await Task.Delay(notYetValidFor + TimeSpan.FromSeconds(1));
+
             var serverCertificateForCommunication = SecretProtection.HasCertificateClientAuthEnhancedKeyUsage(serverCert)
                 ? serverCert
                 : CertificateUtils.CreateClientCertificateFromServerCertificate(serverCert, out _);
@@ -531,15 +537,19 @@ namespace SlowTests.Authentication
             char nodeTag = 'A';
             for (int i = 1; i <= clutserSize; i++)
             {
-                var tcpListener = new TcpListener(IPAddress.Loopback, 0);
-                tcpListener.Start();
-                var port = ((IPEndPoint)tcpListener.LocalEndpoint).Port;
-                tcpListener.Stop();
+                var httpReservation = ReservePort();
+                httpReservation.Socket.Dispose();
+                
                 var setupNodeInfo = new NodeInfo
                 {
-                    Port = port,
+                    Port = httpReservation.Port,
                     Addresses = new List<string> { $"127.0.0.{i}" }
                 };
+                
+                if (PlatformDetails.RunningOnMacOsx)
+                {
+                    setupNodeInfo.Addresses = new List<string> { "127.0.0.1" };
+                }
                 nodeSetupInfos.Add(nodeTag.ToString(), setupNodeInfo);
                 nodeTag++;
             }
@@ -607,6 +617,13 @@ namespace SlowTests.Authentication
                         [RavenConfiguration.GetKey(x => x.Core.ExternalIp)] = externalIp,
                         [RavenConfiguration.GetKey(x => x.Core.AcmeUrl)] = acmeStagingUrl
                     };
+
+                    if (PlatformDetails.RunningOnMacOsx)
+                    {
+                        // currently macOS finds it hard to setup secured cluster and to satisfy heartbeats in rate < 300ms.
+                        // from debugging investigation, it is between 200 < heartbeat < 500
+                        settings[RavenConfiguration.GetKey(x => x.Cluster.ElectionTimeout)] = "700";
+                    }
                     customSettings.Add(settings);
                 }
             }

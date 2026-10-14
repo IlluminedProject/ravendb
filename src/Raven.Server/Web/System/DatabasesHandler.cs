@@ -353,6 +353,8 @@ namespace Raven.Server.Web.System
 
             if (Server.ServerStore.NodeTag == tag)
                 url = ServerStore.GetNodeHttpServerUrl(HttpContext.Request.GetClientRequestedNodeUrl());
+            else if (ServerStore.PublishedServerUrls != null && ServerStore.PublishedServerUrls.Urls.TryGetValue(tag, out var publishedUrls))
+                url = publishedUrls.PublicUrl;
 
             if (url == null)
                 url = clusterTopology.GetUrlFromTag(tag);

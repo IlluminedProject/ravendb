@@ -1,20 +1,18 @@
-import React, { useCallback } from "react";
+import React from "react";
 import {
-    BaseOngoingTaskPanelProps,
     ConnectionStringItem,
     EmptyScriptsWarning,
-    ICanShowTransformationScriptPreview,
     OngoingTaskActions,
     OngoingTaskName,
     OngoingTaskResponsibleNode,
     OngoingTaskStatus,
-    useTasksOperations,
 } from "../../shared/shared";
 import { OngoingTaskAzureQueueStorageEtlInfo } from "components/models/tasks";
 import { useAppUrls } from "hooks/useAppUrls";
 import {
     RichPanel,
     RichPanelActions,
+    RichPanelDetailItem,
     RichPanelDetails,
     RichPanelHeader,
     RichPanelInfo,
@@ -23,51 +21,33 @@ import {
 import { OngoingEtlTaskDistribution } from "../partials/OngoingEtlTaskDistribution";
 import Collapse from "react-bootstrap/Collapse";
 import Form from "react-bootstrap/Form";
-import { useAppSelector } from "components/store";
 import { databaseSelectors } from "components/common/shell/databaseSliceSelectors";
-import { accessManagerSelectors } from "components/common/shell/accessManagerSliceSelectors";
+import { useAppSelector } from "components/store";
 import { Icon } from "components/common/Icon";
+import { EtlPanelBaseProps, useEtlPanel } from "./etlPanelUtils";
+import { TaskPanelErrors, EtlPanelHealthBadge, EtlPanelProgressItem, EtlPanelToggleButton } from "./EtlPanelComponents";
 
-type AzureQueueStorageEtlPanelProps = BaseOngoingTaskPanelProps<OngoingTaskAzureQueueStorageEtlInfo>;
+type AzureQueueStorageEtlPanelProps = EtlPanelBaseProps<OngoingTaskAzureQueueStorageEtlInfo>;
 
-function Details(props: AzureQueueStorageEtlPanelProps & { canEdit: boolean }) {
-    const { data, canEdit } = props;
-    const { appUrl } = useAppUrls();
-    const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
-    const connectionStringsUrl = appUrl.forConnectionStrings(
-        databaseName,
-        "AzureQueueStorage",
-        data.shared.connectionStringName
-    );
-    return (
-        <RichPanelDetails>
-            <ConnectionStringItem
-                connectionStringDefined
-                canEdit={canEdit}
-                connectionStringName={data.shared.connectionStringName}
-                connectionStringsUrl={connectionStringsUrl}
-            />
-            <EmptyScriptsWarning task={data} />
-        </RichPanelDetails>
-    );
-}
+export function AzureQueueStorageEtlPanel(props: AzureQueueStorageEtlPanelProps) {
+    const { data, toggleSelection, isSelected, onTaskOperation, isDeleting, isTogglingState, etlStats } = props;
 
-export function AzureQueueStorageEtlPanel(props: AzureQueueStorageEtlPanelProps & ICanShowTransformationScriptPreview) {
-    const { data, showItemPreview, toggleSelection, isSelected, onTaskOperation, isDeleting, isTogglingState } = props;
-
-    const hasDatabaseAdminAccess = useAppSelector(accessManagerSelectors.getHasDatabaseAdminAccess)();
-    const canEdit = hasDatabaseAdminAccess && !data.shared.serverWide;
     const { forCurrentDatabase } = useAppUrls();
     const editUrl = forCurrentDatabase.editAzureQueueStorageEtl(data.shared.taskId)();
 
-    const { detailsVisible, toggleDetails, onEdit } = useTasksOperations(editUrl, props);
+    const {
+        canEdit,
+        goToTaskErrors,
+        detailsVisible,
+        toggleDetails,
+        onEdit,
+        taskHealth,
+        errorCount,
+        errorsByLocation,
+        etlProgress,
+    } = useEtlPanel(props, editUrl);
 
-    const showPreview = useCallback(
-        (transformationName: string) => {
-            showItemPreview(data, transformationName);
-        },
-        [data, showItemPreview]
-    );
+    const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
 
     return (
         <RichPanel>
@@ -85,10 +65,6 @@ export function AzureQueueStorageEtlPanel(props: AzureQueueStorageEtlPanelProps 
                     <OngoingTaskName task={data} canEdit={canEdit} editUrl={editUrl} />
                 </RichPanelInfo>
                 <RichPanelActions>
-                    <span>
-                        <Icon icon="azure-queue-storage-etl" />
-                        Azure Queue Storage ETL
-                    </span>
                     <OngoingTaskResponsibleNode task={data} />
                     <OngoingTaskStatus
                         task={data}
@@ -104,13 +80,35 @@ export function AzureQueueStorageEtlPanel(props: AzureQueueStorageEtlPanelProps 
                         toggleDetails={toggleDetails}
                         isDeleting={isDeleting(data.shared.taskId)}
                         isDetailsOpen={detailsVisible}
+                        isEtl
                     />
                 </RichPanelActions>
             </RichPanelHeader>
+            <RichPanelDetails>
+                <EtlPanelToggleButton detailsVisible={detailsVisible} toggleDetails={toggleDetails} />
+                <RichPanelDetailItem label="Type">
+                    <Icon icon="azure-queue-storage-etl" />
+                    Azure Queue Storage ETL
+                </RichPanelDetailItem>
+                <ConnectionStringItem
+                    connectionStringDefined
+                    canEdit={canEdit}
+                    connectionStringName={data.shared.connectionStringName}
+                    connectionStringType="AzureQueueStorage"
+                    databaseName={databaseName}
+                />
+                <EtlPanelHealthBadge taskHealth={taskHealth} />
+                <TaskPanelErrors
+                    errorCount={errorCount}
+                    errorsByLocation={errorsByLocation}
+                    goToTaskErrors={goToTaskErrors}
+                />
+                <EtlPanelProgressItem etlProgress={etlProgress} />
+                <EmptyScriptsWarning task={data} />
+            </RichPanelDetails>
             <Collapse in={detailsVisible}>
                 <div>
-                    <Details {...props} canEdit={canEdit} />
-                    <OngoingEtlTaskDistribution task={data} showPreview={showPreview} />
+                    <OngoingEtlTaskDistribution task={data} etlStats={etlStats} />
                 </div>
             </Collapse>
         </RichPanel>

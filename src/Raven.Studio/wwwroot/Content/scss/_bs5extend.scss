@@ -8,6 +8,10 @@
     color: $text-color;
 }
 
+.panel-header-bg {
+    background: var(--panel-header-bg);
+}
+
 .small-label {
     font-size: 0.6rem;
     color: $text-muted-var;
@@ -40,6 +44,25 @@
     mix-blend-mode: luminosity;
     opacity: 0.4;
     transition: all 0.2s $global-easing;
+}
+
+.form-disabled {
+    cursor: not-allowed;
+    filter: contrast(85%);
+    mix-blend-mode: luminosity;
+    opacity: 0.4;
+    transition: all 0.2s $global-easing;
+
+    input,
+    select,
+    textarea,
+    button,
+    .react-select-container,
+    .ace-editor,
+    .form-check {
+        pointer-events: none;
+        cursor: not-allowed;
+    }
 }
 
 .item-busy {
@@ -316,7 +339,7 @@ select {
         --#{$prefix}alert-bg: #{$bg};
         --#{$prefix}alert-border-color: #{$border-color};
 
-        > h3,
+        > :is(h1, h2, h3, h4, h5, h6),
         .title-icon {
             color: $title-color;
         }
@@ -375,6 +398,10 @@ select {
         color: var(--license-enterprise);
     }
     &.enterprise-ai {
+        background-color: var(--faded-enterprise-ai) !important;
+        color: var(--license-enterprise-ai);
+    }
+    &.quill {
         background-color: var(--faded-enterprise-ai) !important;
         color: var(--license-enterprise-ai);
     }
@@ -632,6 +659,7 @@ $filtering-input-bg: $toggle-bg !default;
     min-width: 20em;
     padding-left: $gutter-sm;
     padding-right: $gutter-sm;
+    box-sizing: border-box;
 }
 
 .hover-filter {
@@ -702,6 +730,10 @@ $filtering-input-bg: $toggle-bg !default;
     height: 100%;
 }
 
+.min-height-0 {
+    min-height: 0;
+}
+
 .input-group {
     .react-select__control {
         border-top-right-radius: 0;
@@ -768,5 +800,15 @@ $filtering-input-bg: $toggle-bg !default;
 
     &:hover {
         opacity: 1;
+    }
+}
+
+.monospace-font {
+    font-family: var(--monospace-font), var(--bs-font-monospace) !important;
+}
+
+table {
+    tbody {
+        font-family: var(--table-font), var(--bs-font-sans-serif);
     }
 }

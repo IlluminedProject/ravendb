@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
@@ -13,6 +14,7 @@ namespace Raven.Client.Http
     internal sealed class ClusterRequestExecutor : RequestExecutor
     {
         private readonly SemaphoreSlim _clusterTopologySemaphore = new SemaphoreSlim(1, 1);
+        private bool _usePrivateClusterUrls;
 
         private ClusterRequestExecutor(X509Certificate2 certificate, DocumentConventions conventions, string[] initialUrls) : base(null, certificate, conventions, initialUrls)
         {
@@ -92,10 +94,11 @@ namespace Raven.Client.Http
             return executor;
         }
 
-        public static ClusterRequestExecutor Create(string[] initialUrls, X509Certificate2 certificate, DocumentConventions conventions = null)
+        public static ClusterRequestExecutor Create(string[] initialUrls, X509Certificate2 certificate, DocumentConventions conventions = null, bool usePrivateUrls = false)
         {
             var executor = new ClusterRequestExecutor(certificate, conventions ?? DocumentConventions.Default, initialUrls)
             {
+                _usePrivateClusterUrls = usePrivateUrls,
                 _disableClientConfigurationUpdates = true,
                 _topologyHeaderName = Constants.Headers.ClusterTopologyEtag
             };
@@ -119,6 +122,11 @@ namespace Raven.Client.Http
 
             if (Disposed)
                 return false;
+
+#if NETCOREAPP3_1_OR_GREATER
+            Activity.Current = null;
+#endif
+
             var lockTaken = await _clusterTopologySemaphore.WaitAsync(parameters.TimeoutInMs).ConfigureAwait(false);
             if (lockTaken == false)
                 return false;
@@ -129,7 +137,7 @@ namespace Raven.Client.Http
 
                 using (ContextPool.AllocateOperationContext(out JsonOperationContext context))
                 {
-                    var command = new GetClusterTopologyCommand(parameters.DebugTag);
+                    var command = new GetClusterTopologyCommand(parameters.DebugTag, _usePrivateClusterUrls);
                     await ExecuteAsync(parameters.Node, null, context, command, shouldRetry: false, sessionInfo: null, token: CancellationToken.None).ConfigureAwait(false);
 
                     await ClusterTopologyLocalCache.TrySavingAsync(TopologyHash, command.Result, Conventions, context, CancellationToken.None).ConfigureAwait(false);

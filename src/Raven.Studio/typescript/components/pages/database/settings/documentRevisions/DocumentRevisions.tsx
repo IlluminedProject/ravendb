@@ -126,11 +126,12 @@ export default function DocumentRevisions() {
     });
 
     const asyncEnforceRevisionsConfiguration = useAsyncCallback(
-        async (includeForceCreated: boolean, collections: string[]) => {
+        async (includeForceCreated: boolean, collections: string[], maxOpsPerSecond: number | null) => {
             const dto = await databasesService.enforceRevisionsConfiguration(
                 databaseName,
                 includeForceCreated,
-                collections
+                collections,
+                maxOpsPerSecond
             );
 
             notificationCenter.instance.openDetailsForOperationById(
@@ -354,13 +355,7 @@ export default function DocumentRevisions() {
                     </Col>
                     <Col sm={12} lg={4}>
                         <AboutViewAnchored>
-                            <AccordionItemWrapper
-                                targetId="1"
-                                icon="about"
-                                color="info"
-                                description="Get additional info on this feature"
-                                heading="About this view"
-                            >
+                            <AccordionItemWrapper targetId="1" icon="about" color="info">
                                 <p>
                                     Creating <strong>Document Revisions</strong> allows keeping track of changes made to
                                     a document over time.
@@ -450,6 +445,7 @@ const defaultFeatureAvailability: FeatureAvailabilityData[] = [
         community: { value: false },
         professional: { value: true },
         enterprise: { value: true },
+        quill: { value: true },
     },
     {
         featureName: "Max revisions to keep",
@@ -457,6 +453,7 @@ const defaultFeatureAvailability: FeatureAvailabilityData[] = [
         community: { value: 2 },
         professional: { value: Infinity },
         enterprise: { value: Infinity },
+        quill: { value: Infinity },
     },
     {
         featureName: "Max retention time (days)",
@@ -464,5 +461,6 @@ const defaultFeatureAvailability: FeatureAvailabilityData[] = [
         community: { value: 45 },
         professional: { value: Infinity },
         enterprise: { value: Infinity },
+        quill: { value: Infinity },
     },
 ];

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -7,9 +8,11 @@ using Newtonsoft.Json;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Documents.Operations.ConnectionStrings;
 using Raven.Server.Documents;
+using Raven.Server.Documents.ETL;
 using Tests.Infrastructure;
 using Xunit;
 using Task = System.Threading.Tasks.Task;
+using Raven.Server.Documents.TasksErrors;
 
 namespace SlowTests.Server.Documents.AI.GenAi.Issues
 {
@@ -89,10 +92,14 @@ ai.genContext({})
                 session.Advanced.Attachments.Store(FirstItemId, Image+actualFormat, file1);
                 await session.SaveChangesAsync();
             }
-            Assert.True(await etl.WaitAsync(TimeSpan.FromSeconds(Debugger.IsAttached ? 1200 : 30)));
-        
-            var db = await Server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
-            Assert.False(ValidateErrorNotification(db, string.Empty), PrintNotificationErrors(db));
+
+            Assert.True(await etl.WaitAsync(TimeSpan.FromSeconds(Debugger.IsAttached ? 1200 : 65)), await Etl.GetEtlDebugInfo(store.Database, TimeSpan.FromSeconds(60)));
+
+            var transformationErrors = (await Etl.GetItemTransformationErrorsAsync(store.Database, config)).ToList();
+            var loadErrors = (await Etl.GetItemLoadErrorsAsync(store.Database, config)).ToList();
+            Assert.Empty(transformationErrors);
+            Assert.Empty(loadErrors);
+
             using (var session = store.OpenAsyncSession())
             {
                 var item1 = await session.LoadAsync<Item>(FirstItemId);
@@ -137,8 +144,14 @@ ai.genContext({})
             }
             await etl.WaitAsync(TimeSpan.FromSeconds(Debugger.IsAttached ? 1200 : 30));
 
-            var db = await Server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
-            Assert.True(ValidateErrorNotification(db, $"Attachment must be loaded or base64 string (on type image/png)"));
+            IEnumerable<TaskItemErrorTableValue> errors = null;
+            var hasError = await WaitForValueAsync(async () =>
+            {
+                errors = await Etl.GetItemTransformationErrorsAsync(store.Database, config);
+                return errors.Any(e => e.Error.Contains("Attachment must be loaded or base64 string (on type image/png)"));
+            }, true, timeout: 60_000);
+
+            Assert.True(hasError, $"Expected transformation error not found. Errors: {string.Join(", ", errors?.Select(e => $"{e.DocumentId}: {e.Error}") ?? Array.Empty<string>())}");
         }
 
         [RavenTheory(RavenTestCategory.Ai)]
@@ -185,12 +198,18 @@ ai.genContext({})
             }
             Assert.False(await etl.WaitAsync(TimeSpan.FromSeconds(Debugger.IsAttached ? 1200 : 30)));
 
-            var db = await Server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(store.Database);
-            if (config.Connection.OpenAiSettings != null)
-                Assert.True(ValidateErrorNotification(db, "You uploaded an unsupported image."));
+            var expectedError = config.Connection.OpenAiSettings != null
+                ? "You uploaded an unsupported image."
+                : "Unable to process input image";
 
-            if (config.Connection.GoogleSettings != null)
-                Assert.True(ValidateErrorNotification(db, "Unable to process input image"));
+            IEnumerable<TaskItemErrorTableValue> errors = null;
+            var hasError = await WaitForValueAsync(async () =>
+            {
+                errors = await Etl.GetItemLoadErrorsAsync(store.Database, config);
+                return errors.Any(e => e.Error.Contains(expectedError));
+            }, true, timeout: 60_000);
+
+            Assert.True(hasError, $"Expected error containing '{expectedError}' not found. Errors: {string.Join(", ", errors?.Select(e => $"{e.DocumentId}: {e.Error}") ?? Array.Empty<string>())}");
         }
 
         private static Stream GetEmbeddedImgStream(string format)

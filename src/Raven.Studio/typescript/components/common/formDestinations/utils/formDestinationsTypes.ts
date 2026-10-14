@@ -26,10 +26,14 @@ export interface S3Destination extends FormDestinationDataBase, AmazonDestinatio
     bucketName?: string;
     customServerUrl?: string;
     forcePathStyle?: boolean;
+    disableChecksumValidation?: boolean;
     isUseCustomHost?: boolean;
 }
 
+export type AzureAuthType = "accountKey" | "sasToken";
+
 export interface AzureDestination extends FormDestinationDataBase {
+    authType?: AzureAuthType;
     accountKey?: string;
     accountName?: string;
     remoteFolderName?: string;

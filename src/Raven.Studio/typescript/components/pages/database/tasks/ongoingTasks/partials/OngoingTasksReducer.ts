@@ -31,8 +31,10 @@ import {
     OngoingTaskReplicationHubNodeInfoDetails,
     OngoingInternalReplicationNodeInfo,
     OngoingTaskAmazonSqsEtlSharedInfo,
+    OngoingTaskCdcSinkSharedInfo,
     OngoingTaskEmbeddingsGenerationSharedInfo,
     OngoingTaskGenAiSharedInfo,
+    OngoingTaskAzureServiceBusSinkSharedInfo,
 } from "components/models/tasks";
 import OngoingTasksResult = Raven.Server.Web.System.OngoingTasksResult;
 import OngoingTask = Raven.Client.Documents.Operations.OngoingTasks.OngoingTask;
@@ -54,6 +56,7 @@ import { produce, Draft } from "immer";
 import OngoingTaskSubscription = Raven.Client.Documents.Operations.OngoingTasks.OngoingTaskSubscription;
 import OngoingTaskQueueEtlListView = Raven.Client.Documents.Operations.OngoingTasks.OngoingTaskQueueEtl;
 import OngoingTaskQueueSinkListView = Raven.Client.Documents.Operations.OngoingTasks.OngoingTaskQueueSink;
+import OngoingTaskCdcSink = Raven.Client.Documents.Operations.OngoingTasks.OngoingTaskCdcSink;
 import OngoingTaskBackup = Raven.Client.Documents.Operations.OngoingTasks.OngoingTaskBackup;
 import SubscriptionConnectionsDetails = Raven.Server.Documents.TcpHandlers.SubscriptionConnectionsDetails;
 import DatabaseUtils from "components/utils/DatabaseUtils";
@@ -63,6 +66,7 @@ import ReplicationProcessProgress = Raven.Server.Documents.Replication.Stats.Rep
 import InternalReplicationTaskProgress = Raven.Server.Documents.Replication.Stats.InternalReplicationTaskProgress;
 import TaskUtils from "components/utils/TaskUtils";
 import { sortBy } from "common/typeUtils";
+import { loadStatus } from "components/models/common";
 
 interface ActionTasksLoaded {
     location: databaseLocationSpecifier;
@@ -113,10 +117,17 @@ interface ActionTasksLoadError {
     error: string;
 }
 
+export interface LocationLoadStatus {
+    location: databaseLocationSpecifier;
+    status: loadStatus;
+    error?: string;
+}
+
 export interface OngoingTasksState {
     tasks: OngoingTaskInfo[];
     subscriptions: OngoingTaskSubscriptionInfo[];
     locations: databaseLocationSpecifier[];
+    locationsLoadStatus: LocationLoadStatus[];
     orchestrators: string[];
     replicationHubs: OngoingTaskHubDefinitionInfo[];
     subscriptionConnectionDetails: SubscriptionConnectionsDetailsWithId[];
@@ -394,9 +405,35 @@ function mapSharedInfo(task: OngoingTask): OngoingTaskSharedInfo {
                     };
                     return result;
                 }
+                case "AzureServiceBus": {
+                    // noinspection UnnecessaryLocalVariableJS
+                    const result: OngoingTaskAzureServiceBusSinkSharedInfo = {
+                        ...commonProps,
+                        connectionStringName: incoming.ConnectionStringName,
+                        url: incoming.Url,
+                    };
+                    return result;
+                }
                 default:
                     throw new Error("Invalid broker type: " + incoming.BrokerType);
             }
+        }
+        case "CdcSink": {
+            const incoming = task as OngoingTaskCdcSink;
+            const result: OngoingTaskCdcSinkSharedInfo = {
+                ...commonProps,
+                connectionStringName: incoming.ConnectionStringName,
+                factoryName: incoming.FactoryName,
+                configuration: incoming.Configuration,
+                lastBatchTime: incoming.LastBatchTime,
+                lastCheckpoint: incoming.LastCheckpoint,
+                secondsSinceLastBatch: incoming.SecondsSinceLastBatch,
+                lastActivityTime: incoming.LastActivityTime,
+                secondsSinceLastActivity: incoming.SecondsSinceLastActivity,
+                healthIssue: incoming.HealthIssue,
+                error: incoming.Error,
+            };
+            return result;
         }
         case "Backup": {
             const incoming = task as OngoingTaskBackup;
@@ -436,6 +473,8 @@ function mapSharedInfo(task: OngoingTask): OngoingTaskSharedInfo {
                 topologyDiscoveryUrls: incoming.TopologyDiscoveryUrls,
                 hubName: incoming.HubName,
                 mode: incoming.Mode,
+                hubCursor: incoming.HubCursor,
+                sinkCursor: incoming.SinkCursor,
             };
             return result;
         }
@@ -564,6 +603,19 @@ function initNodesInfo(
     );
 }
 
+function markLocationLoadStatus(
+    draft: Draft<OngoingTasksState>,
+    location: databaseLocationSpecifier,
+    status: loadStatus,
+    error?: string
+) {
+    const item = draft.locationsLoadStatus.find((x) => databaseLocationComparator(x.location, location));
+    if (item) {
+        item.status = status;
+        item.error = error;
+    }
+}
+
 const mapTask = (
     incomingTask: OngoingTask,
     incomingLocation: databaseLocationSpecifier,
@@ -644,6 +696,8 @@ export const ongoingTasksReducer: Reducer<OngoingTasksState, OngoingTaskReducerA
             const sharded = state.orchestrators.length > 0;
 
             return produce(state, (draft) => {
+                markLocationLoadStatus(draft, incomingLocation, "success");
+
                 const newTasks = incomingTasks.OngoingTasks.map((incomingTask) =>
                     mapTask(incomingTask, incomingLocation, state)
                 );
@@ -738,6 +792,8 @@ export const ongoingTasksReducer: Reducer<OngoingTasksState, OngoingTaskReducerA
             const error = action.error;
 
             return produce(state, (draft) => {
+                markLocationLoadStatus(draft, incomingLocation, "failure", error);
+
                 draft.tasks.forEach((task) => {
                     const nodeInfo = task.nodesInfo.find((x) =>
                         databaseLocationComparator(x.location, incomingLocation)
@@ -955,12 +1011,17 @@ export const ongoingTasksReducerInitializer = (db: DatabaseSharedInfo): OngoingT
         })
     );
 
+    const locationsLoadStatus = [...orchestrators.map((nodeTag) => ({ nodeTag })), ...locations].map(
+        (location): LocationLoadStatus => ({ location, status: "idle" })
+    );
+
     return {
         tasks: [],
         subscriptions: [],
         replicationHubs: [],
         locations,
         orchestrators,
+        locationsLoadStatus,
         subscriptionConnectionDetails: [],
         internalReplication,
     };

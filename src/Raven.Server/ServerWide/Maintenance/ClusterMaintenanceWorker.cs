@@ -22,6 +22,7 @@ using Sparrow.Logging;
 using Sparrow.LowMemory;
 using Sparrow.Server.Logging;
 using Sparrow.Server.Utils;
+using Sparrow.Utils;
 using Index = Raven.Server.Documents.Indexes.Index;
 
 namespace Raven.Server.ServerWide.Maintenance
@@ -203,6 +204,13 @@ namespace Raven.Server.ServerWide.Maintenance
                     {
                         var report = new DatabaseStatusReport { Name = dbName, NodeName = _server.NodeTag };
 
+                        prevReport.TryGetValue(dbName, out var prevDatabaseReport);
+
+                        // Applications can't be added or removed while the config database isn't loaded, so the
+                        // paths below that report without reading it keep the last set we saw. Dropping it would
+                        // stop metering every application cluster-wide until the database is loaded again.
+                        report.QuillApplications = prevDatabaseReport?.QuillApplications;
+
                         if (topology == null)
                         {
                             continue;
@@ -256,6 +264,7 @@ namespace Raven.Server.ServerWide.Maintenance
                         }
 
                         report.Status = DatabaseStatus.Loaded;
+                        report.DatabaseId = dbInstance.DbBase64Id;
                         var now = dbInstance.Time.GetUtcNow();
                         try
                         {
@@ -291,8 +300,6 @@ namespace Raven.Server.ServerWide.Maintenance
 
                             // Calculate the hash based on all relevant components (db state plus backup statuses).
                             report.EnvironmentsHash = Hashing.Combine(dbInstance.GetEnvironmentsHash(), DatabaseStatusReport.GetPeriodicBackupStatusesHash(periodicBackupStatuses));
-
-                            prevReport.TryGetValue(dbName, out var prevDatabaseReport);
 
                             // Check if anything has changed.
                             if (SupportedFeatures.Heartbeats.SendChangesOnly &&
@@ -358,7 +365,7 @@ namespace Raven.Server.ServerWide.Maintenance
             report.LastCompletedClusterTransaction = dbInstance.LastCompletedClusterTransaction;
         }
 
-        private static void FillIndexInfo(Index index, QueryOperationContext context, DateTime now, DatabaseStatusReport report)
+        internal static void FillIndexInfo(Index index, QueryOperationContext context, DateTime now, DatabaseStatusReport report)
         {
             var stats = index.GetIndexingState(context);
             var lastQueried = GetLastQueryInfo(index);
@@ -377,7 +384,7 @@ namespace Raven.Server.ServerWide.Maintenance
             };
         }
 
-        private static TimeSpan GetLastQueryInfo(Index index)
+        private static TimeSpan? GetLastQueryInfo(Index index)
         {
             return index.GetElapsedTimeFromLastQuery();
         }
@@ -393,6 +400,8 @@ namespace Raven.Server.ServerWide.Maintenance
                 report.NumberOfConflicts = prevDatabaseReport.NumberOfConflicts;
                 report.NumberOfDocuments = prevDatabaseReport.NumberOfDocuments;
                 report.DatabaseChangeVector = prevDatabaseReport.DatabaseChangeVector;
+                report.QuillApplications = prevDatabaseReport.QuillApplications;
+                report.SystemCollections = prevDatabaseReport.SystemCollections;
             }
             else
             {
@@ -403,8 +412,50 @@ namespace Raven.Server.ServerWide.Maintenance
                     report.NumberOfConflicts = documentsStorage.ConflictsStorage.ConflictsCount;
                     report.NumberOfDocuments = documentsStorage.GetNumberOfDocuments(context);
                     report.DatabaseChangeVector = DocumentsStorage.GetDatabaseChangeVector(context);
+                    report.QuillApplications = ReadQuillApplications(context, dbInstance);
+                    report.SystemCollections = GetSystemCollectionsStats(context, documentsStorage);
                 }
             }
+        }
+
+        private static HashSet<string> ReadQuillApplications(DocumentsOperationContext context, DocumentDatabase documentDatabase)
+        {
+            if (string.Equals(documentDatabase.Name, Constants.Quill.ConfigDatabase, StringComparison.OrdinalIgnoreCase) == false)
+                return null;
+
+            var applications = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var document in documentDatabase.DocumentsStorage.GetDocumentsStartingWith(context, Constants.Quill.AppIdPrefix, matches: null,
+                         exclude: null, startAfterId: null, start: 0, take: long.MaxValue,
+                         fields: DocumentFields.Id | DocumentFields.Data))
+            {
+                using (document)
+                {
+                    if (document.Data.TryGet(Constants.Quill.ApplicationDatabasePropertyName, out string databaseName) && string.IsNullOrWhiteSpace(databaseName) == false)
+                    {
+                        applications.Add(databaseName);
+                    }
+                }
+            }
+
+            return applications;
+        }
+
+        private static Dictionary<string, long> GetSystemCollectionsStats(DocumentsOperationContext context, DocumentsStorage documentsStorage)
+        {
+            var stats = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var collection in documentsStorage.GetCollectionsNames(context))
+            {
+                if (collection.StartsWith('@') == false ||
+                    CollectionName.IsHiLoCollection(collection) ||
+                    CollectionName.IsEmptyCollection(collection))
+                    continue;
+
+                stats[collection] = documentsStorage.GetNumberOfDocumentsFor(collection, context);
+            }
+
+            return stats;
         }
 
         private static void FillReplicationInfo(DocumentDatabase dbInstance, DatabaseStatusReport report)
@@ -421,7 +472,7 @@ namespace Raven.Server.ServerWide.Maintenance
 
         public void Dispose()
         {
-            _cts.Cancel();
+            _cts.SafeCancel(_logger, $"{nameof(ClusterMaintenanceWorker)} '{_name}'");
             _tcp.Dispose();
 
             try

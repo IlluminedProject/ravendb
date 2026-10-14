@@ -1,6 +1,7 @@
 ﻿import { DatabaseLocalInfo, DatabaseSharedInfo, MergedDatabaseState } from "components/models/databases";
 import BackupInfo = Raven.Client.ServerWide.Operations.BackupInfo;
 import moment from "moment";
+import genUtils from "common/generalUtils";
 import { locationAwareLoadableData } from "components/models/common";
 
 export default class DatabaseUtils {
@@ -36,6 +37,12 @@ export default class DatabaseUtils {
 
     static shardGroupKey(name: string) {
         return DatabaseUtils.isSharded(name) ? name.split("$")[0] : name;
+    }
+
+    // Database names are case-insensitive, e.g. a certificate may define permissions
+    // with different letter casing than the actual database name
+    static namesEqualIgnoreCase(name1: string, name2: string) {
+        return name1 != null && name2 != null && name1.toLowerCase() === name2.toLowerCase();
     }
 
     static shardNumber(name: string): number {
@@ -131,7 +138,7 @@ export default class DatabaseUtils {
         const diff = moment().utc().diff(dateInUtc);
         const durationInSeconds = moment.duration(diff).asSeconds();
 
-        const backupDate = moment.utc(backupInfo.LastBackup).local().fromNow();
+        const backupDate = genUtils.formatDurationByDate(dateInUtc, true);
 
         const text = `Backed up ${backupDate}`;
 

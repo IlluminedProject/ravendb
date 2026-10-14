@@ -250,7 +250,9 @@ namespace Raven.Client.Documents.Conventions
                 DefaultForServer.HttpVersion = httpVersion;
             }
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && (RuntimeInformation.ProcessArchitecture == Architecture.Arm || RuntimeInformation.ProcessArchitecture == Architecture.Arm64))
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
+                (RuntimeInformation.ProcessArchitecture == Architecture.Arm || RuntimeInformation.ProcessArchitecture == Architecture.Arm64) &&
+                IsZstdAvailable() == false)
             {
                 DefaultHttpCompressionAlgorithm = HttpCompressionAlgorithm.Gzip;
                 Default.HttpCompressionAlgorithm = HttpCompressionAlgorithm.Gzip;
@@ -277,22 +279,32 @@ namespace Raven.Client.Documents.Conventions
 #endif
 
 #if NETCOREAPP3_1_OR_GREATER
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ||
+                (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && (RuntimeInformation.ProcessArchitecture == Architecture.Arm || RuntimeInformation.ProcessArchitecture == Architecture.Arm64)))
             {
-                try
-                {
-                    ZstdLib.GetMaxCompression(1);
-                }
-                catch
-                {
+                if (IsZstdAvailable() == false)
                     DefaultDisableTcpCompression = true;
-                }
             }
 #endif
 
             Default.Freeze();
             DefaultForServer.Freeze();
         }
+
+#if NETCOREAPP3_1_OR_GREATER
+        private static bool IsZstdAvailable()
+        {
+            try
+            {
+                ZstdLib.GetMaxCompression(1);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+#endif
 
         /// <summary>
         ///     Initializes a new instance of the <see cref="DocumentConventions" /> class.
@@ -329,6 +341,8 @@ namespace Raven.Client.Documents.Conventions
             FindPropertyNameForDynamicIndex = DefaultFindPropertyNameForDynamicIndex;
 
             MaxNumberOfRequestsPerSession = 30;
+
+            SessionPatchBehavior = SessionPatchBehavior.JsonPatch;
 
             BulkInsert = new BulkInsertConventions(this);
             Sharding = new ShardingConventions(this);
@@ -379,6 +393,7 @@ namespace Raven.Client.Documents.Conventions
 
         private bool _saveEnumsAsIntegers;
         private bool _saveEnumsAsIntegersForPatching;
+        private SessionPatchBehavior _sessionPatchBehavior;
         private char _identityPartsSeparator;
         private bool _disableTopologyUpdates;
 
@@ -1117,6 +1132,23 @@ namespace Raven.Client.Documents.Conventions
             {
                 AssertNotFrozen();
                 _saveEnumsAsIntegersForPatching = value;
+            }
+        }
+
+        /// <summary>
+        ///     Determines whether the session <c>Patch</c> methods emit RFC 6902 JsonPatch commands
+        ///     (<see cref="Conventions.SessionPatchBehavior.JsonPatch" />, the default) or legacy
+        ///     JavaScript patch commands (<see cref="Conventions.SessionPatchBehavior.JavaScript" />).
+        ///     Set to <see cref="Conventions.SessionPatchBehavior.JavaScript" /> to opt out of the
+        ///     JsonPatch code path entirely and restore the previous behavior.
+        /// </summary>
+        public SessionPatchBehavior SessionPatchBehavior
+        {
+            get => _sessionPatchBehavior;
+            set
+            {
+                AssertNotFrozen();
+                _sessionPatchBehavior = value;
             }
         }
 

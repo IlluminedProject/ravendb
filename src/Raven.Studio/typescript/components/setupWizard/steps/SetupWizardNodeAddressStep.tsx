@@ -39,7 +39,8 @@ import { isEmpty } from "common/typeUtils";
 import Row from "react-bootstrap/Row";
 import Col from "react-bootstrap/esm/Col";
 import { useEventsCollector } from "components/hooks/useEventsCollector";
-import { setupWizardConstants, setupWizardGA4Prefixes } from "components/setupWizard/utils/setupWizardConstants";
+import { setupWizardGA4Prefixes } from "components/setupWizard/utils/setupWizardConstants";
+import { getMaxClusterSize } from "components/setupWizard/utils/setupWizardUtils";
 import useBoolean from "hooks/useBoolean";
 import { SetupWizardInfoPopover } from "components/setupWizard/partials/SetupWizardInfoPopover";
 import { components, OptionProps, SingleValueProps } from "react-select";
@@ -326,7 +327,6 @@ function NodeDetailsPanelHeader({ control, index, onRemove, editNodeForm }: Node
             dnsName: securityOption === "ownCertificate" ? formData.dnsName : null,
             nodeUrl: handleNodeUrl(formData),
             httpPort: formData.httpPort == null ? (securityOption === "none" ? 8080 : 443) : formData.httpPort,
-            nodeTag: formData.isPassive ? null : formData.nodeTag,
             isEditing: false,
             isNewlyAdded: false,
         });
@@ -359,7 +359,7 @@ function NodeDetailsPanelHeader({ control, index, onRemove, editNodeForm }: Node
         }
     };
 
-    const isPassiveVisible = securityOption === "none" && method !== "createPackage" && nodes.length === 1;
+    const isPassiveVisible = method !== "createPackage" && nodes.length === 1;
 
     return (
         <RichPanelHeader>
@@ -597,7 +597,7 @@ function NodeDetailsPanelEdit({
     const { isExternalRequired } = useHostnameDetectionSideEffects({ editNodeForm, parentControl });
 
     const isDNSVisible = securityOption === "ownCertificate" && !isWildcardCertificate;
-    const isPassiveVisible = securityOption === "none" && setupMethod !== "createPackage" && nodes.length === 1;
+    const isPassiveVisible = setupMethod !== "createPackage" && nodes.length === 1;
 
     const canCustomizeExternalIpsAndPorts = securityOption === "letsEncrypt";
     const canCustomizeExternalTcpPorts = securityOption === "ownCertificate";
@@ -619,9 +619,10 @@ function NodeDetailsPanelEdit({
                                 <PopoverWithHoverWrapper
                                     message={
                                         <SetupWizardInfoPopover
-                                            description="When enabled, the node starts in passive mode and does not join a cluster. 
-                                                This is useful when the node is meant for monitoring, initialization, or handling setup tasks without participating in cluster operations. 
-                                                It can also be used to isolate the node for testing or debugging."
+                                            description="When enabled, the node starts in passive mode and does not join a cluster.
+                                                This is useful when the node is meant for monitoring, initialization, or handling setup tasks without participating in cluster operations.
+                                                It can also be used to isolate the node for testing or debugging.
+                                                The node will leave passive state when a cluster operation is performed on it, such as creating a database or adding it to a cluster."
                                             ravenLinkHash="2WV7N1"
                                         />
                                     }
@@ -914,7 +915,7 @@ function AddAnotherNode({ onAddNode }: AddAnotherNodeProps) {
     const nodeData = getValues("nodeAddressStep.nodes");
 
     const hasLicense = !!licenseKeyStep?.licenseInfo;
-    const maxClusterSize = licenseKeyStep?.licenseInfo?.maxClusterSize ?? setupWizardConstants.AGPL_MAX_CLUSTER_SIZE;
+    const maxClusterSize = getMaxClusterSize(licenseKeyStep?.licenseInfo);
     const isMaxClusterNodes = nodeData?.length >= maxClusterSize;
 
     return (
@@ -1208,7 +1209,7 @@ export function SetupWizardNodeAddressStepFooter() {
     const nodeData = getValues("nodeAddressStep.nodes");
     const licenseKeyStep = getValues("licenseKeyStep");
 
-    const maxClusterSize = licenseKeyStep?.licenseInfo?.maxClusterSize ?? setupWizardConstants.AGPL_MAX_CLUSTER_SIZE;
+    const maxClusterSize = getMaxClusterSize(licenseKeyStep?.licenseInfo);
     const hasExceededLicenseLimit = nodeData?.length > maxClusterSize;
 
     const isEditing = nodeData?.some((node) => node.isEditing);
@@ -1418,7 +1419,7 @@ function LicenseLimitExceededMessage() {
     const nodeData = getValues("nodeAddressStep.nodes");
     const licenseKeyStep = getValues("licenseKeyStep");
 
-    const maxClusterSize = licenseKeyStep?.licenseInfo?.maxClusterSize ?? setupWizardConstants.AGPL_MAX_CLUSTER_SIZE;
+    const maxClusterSize = getMaxClusterSize(licenseKeyStep?.licenseInfo);
     const currentNodeCount = nodeData?.length;
 
     return (

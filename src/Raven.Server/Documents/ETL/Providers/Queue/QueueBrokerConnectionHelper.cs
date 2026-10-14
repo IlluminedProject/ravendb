@@ -1,17 +1,19 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Threading;
 using Amazon;
 using Amazon.SQS;
 using Azure.Identity;
+using Azure.Messaging.ServiceBus;
 using Azure.Storage.Queues;
-using System.Security.Cryptography;
 using Confluent.Kafka;
 using RabbitMQ.Client;
 using Raven.Client.Documents.Operations.ETL.Queue;
 using Raven.Server.Utils;
 using Sparrow.Server.Logging;
-using ClientConfig = Confluent.Kafka.ClientConfig;
 
 namespace Raven.Server.Documents.ETL.Providers.Queue;
 
@@ -51,9 +53,35 @@ public static class QueueBrokerConnectionHelper
         return producer;
     }
 
+    private static readonly Lazy<DllNotFoundException> KafkaLibraryLoadError = new(() =>
+    {
+        try
+        {
+            Library.Load();
+            return null;
+        }
+        catch (DllNotFoundException e)
+        {
+            // e.g. librdkafka.redist does not ship win-arm64 binaries
+            return e;
+        }
+    }, LazyThreadSafetyMode.PublicationOnly);
+
+    public static void EnsureKafkaIsSupported()
+    {
+        var loadError = KafkaLibraryLoadError.Value;
+        if (loadError != null)
+        {
+            throw new NotSupportedException(
+                $"Kafka is not supported on this platform ({RuntimeInformation.OSDescription}, {RuntimeInformation.ProcessArchitecture}) because the librdkafka native library could not be loaded.", loadError);
+        }
+    }
+
     public static void SetupKafkaClientConfig(ClientConfig config, KafkaConnectionSettings settings,
         CertificateUtils.CertificateHolder certificateHolder = null)
     {
+        EnsureKafkaIsSupported();
+
         if (settings.UseRavenCertificate && certificateHolder?.ClientCertificate != null)
         {
             config.SslCertificatePem = certificateHolder.ClientCertificate.ExportCertificatePem();
@@ -166,5 +194,37 @@ public static class QueueBrokerConnectionHelper
         }
 
         return sqsClient;
+    }
+
+    public static ServiceBusClient CreateAzureServiceBusClient(string identifier, AzureServiceBusConnectionSettings azureServiceBusConnectionSettings)
+    {
+        var options = new ServiceBusClientOptions
+        {
+            Identifier = identifier
+        };
+
+        if (string.IsNullOrWhiteSpace(azureServiceBusConnectionSettings.ConnectionString) == false)
+        {
+            return new ServiceBusClient(azureServiceBusConnectionSettings.ConnectionString, options);
+        }
+
+        if (azureServiceBusConnectionSettings.EntraId != null)
+        {
+            return new ServiceBusClient(
+                azureServiceBusConnectionSettings.EntraId.Namespace,
+                new ClientSecretCredential(
+                    azureServiceBusConnectionSettings.EntraId.TenantId,
+                    azureServiceBusConnectionSettings.EntraId.ClientId,
+                    azureServiceBusConnectionSettings.EntraId.ClientSecret), options);
+        }
+
+        if (azureServiceBusConnectionSettings.Passwordless != null)
+        {
+            return new ServiceBusClient(
+                azureServiceBusConnectionSettings.Passwordless.Namespace,
+                new DefaultAzureCredential(), options);
+        }
+
+        throw new InvalidOperationException("No valid Azure Service Bus connection settings provided.");
     }
 }

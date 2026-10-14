@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using FastTests;
 using Raven.Client.Documents.AI;
@@ -30,7 +31,7 @@ public class AiAgentClientApiHandleActionCalls : RavenTestBase
     }
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task CanHandleToolCall(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -62,9 +63,12 @@ public class AiAgentClientApiHandleActionCalls : RavenTestBase
     }
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single, 
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single,
         Data = [AiHandleErrorStrategy.SendErrorsToModel])]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single, 
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single,
+        Data = [AiHandleErrorStrategy.SendErrorsToModel],
+        Skip = "Flaky on Ollama: after a tool error the local model can exhaust its 8K context window while reasoning and return finish_reason = 'length'.")]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single,
         Data = [AiHandleErrorStrategy.RaiseImmediately])]
     public async Task CanHandleToolCallWithException(Options options, GenAiConfiguration config, AiHandleErrorStrategy strategy)
     {
@@ -104,7 +108,7 @@ public class AiAgentClientApiHandleActionCalls : RavenTestBase
     }
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task CanHandleToolCallWithArgs(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -161,7 +165,7 @@ Deviation from these rules is not allowed.");
     }
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task CantCreateNewConversationWithSameId(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -201,6 +205,49 @@ Deviation from these rules is not allowed.");
             string.Empty);
         chat2.SetUserPrompt("hi");
         await Assert.ThrowsAsync<ConcurrencyException>(() => chat2.RunAsync<Sample>());
+    }
+
+    private class OrderResult
+    {
+        public string ProductName { get; set; }
+        public int Quantity { get; set; }
+    }
+
+    [RavenTheory(RavenTestCategory.Ai)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
+    public async Task CanHandleAsyncToolCallReturningList(Options options, GenAiConfiguration config)
+    {
+        using var store = GetDocumentStore(options);
+
+        await store.Maintenance.SendAsync(new PutConnectionStringOperation<AiConnectionString>(config.Connection));
+
+        var agent = BuildAgent(config.ConnectionStringName);
+        var r = await store.AI.CreateAgentAsync(agent, new Sample
+        {
+            Answer = "the answer"
+        });
+        var chat = store.AI.Conversation(
+            r.Identifier,
+            "chats/123",
+            new AiConversationCreationOptions().AddParameter("company", "companies/90-A"));
+
+        var recentOrderCalled = false;
+        chat.Handle(RecentOrder, async (object _) =>
+        {
+            await Task.Delay(10);
+            recentOrderCalled = true;
+            return new List<OrderResult>
+            {
+                new() { ProductName = "Widget", Quantity = 2 },
+                new() { ProductName = "Gadget", Quantity = 1 }
+            };
+        });
+
+        chat.SetUserPrompt("fetch my recent orders");
+        var run = await chat.RunAsync<Sample>();
+        Assert.Equal(AiConversationResult.Done, run.Status);
+        Assert.NotNull(run.Answer.Answer);
+        Assert.True(recentOrderCalled);
     }
 
     internal static AiAgentConfiguration BuildAgent(string connection)

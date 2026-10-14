@@ -13,10 +13,12 @@ using Raven.Client.Documents.Operations.ConnectionStrings;
 using Raven.Client.Documents.Operations.ETL;
 using Raven.Client.Documents.Operations.OngoingTasks;
 using Raven.Client.Documents.Operations.Replication;
+using Raven.Client.Documents.Operations.Revisions;
 using Raven.Client.Documents.Session;
 using Raven.Client.Documents.Session.TimeSeries;
 using Raven.Client.Documents.Smuggler;
 using Raven.Client.Exceptions;
+using Raven.Client.ServerWide.Commands;
 using Raven.Client.ServerWide.Operations;
 using Raven.Client.ServerWide.Operations.Certificates;
 using Raven.Server.Config;
@@ -24,8 +26,10 @@ using Raven.Server.Documents;
 using Raven.Server.Documents.Replication;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
+using Raven.Server.Utils;
 using Raven.Tests.Core.Utils.Entities;
 using Sparrow;
+using Sparrow.Json;
 using Tests.Infrastructure;
 using Xunit;
 
@@ -193,6 +197,41 @@ namespace SlowTests.Issues
                     CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
                     AllowedHubToSinkPaths = new[] { "users/ayende", "users/ayende/*" }
                 }));
+        }
+
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task Can_setup_filtered_replication_trimming_whitespace_in_hub_access_paths()
+        {
+            var certificates = Certificates.SetupServerAuthentication();
+            var dbNameA = GetDatabaseName();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var storeA = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+                ModifyDatabaseName = s => dbNameA
+            });
+
+            var pullCert = certificates.ClientCertificate2.Value;
+            await storeA.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = "pull",
+                WithFiltering = true
+            }));
+            await storeA.Maintenance.SendAsync(new RegisterReplicationHubAccessOperation("pull",
+                new ReplicationHubAccess
+                {
+                    Name = "Arava",
+                    CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
+                    AllowedHubToSinkPaths = new[] { " users/ayende/* ", "   " },
+                    AllowedSinkToHubPaths = new[] { " orders/1 ", "\t" }
+                }));
+
+            var access = Assert.Single(await storeA.Maintenance.SendAsync(new GetReplicationHubAccessOperation("pull")));
+            Assert.Equal(new[] { "users/ayende/*" }, access.AllowedHubToSinkPaths);
+            Assert.Equal(new[] { "orders/1" }, access.AllowedSinkToHubPaths);
         }
 
         [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
@@ -811,6 +850,212 @@ namespace SlowTests.Issues
         }
 
         [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task HubToSinkShouldUseUpdatedSinkPathFilter()
+        {
+            const int timeout = 30_000;
+            const int filteredTimeout = 3_000;
+
+            var certificates = Certificates.SetupServerAuthentication();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var hubStore = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+            });
+            using var sinkStore = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+            });
+
+#pragma warning disable SYSLIB0057
+            var pullCert = new X509Certificate2(await File.ReadAllBytesAsync(certificates.ClientCertificate2Path), (string)null,
+                X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
+
+            const string hubName = "filtered-hub-to-sink";
+            var connectionStringName = hubStore.Database + "ConStr";
+
+            await hubStore.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = hubName,
+                Mode = PullReplicationMode.HubToSink,
+                WithFiltering = true
+            }));
+
+            await hubStore.Maintenance.SendAsync(new RegisterReplicationHubAccessOperation(hubName, new ReplicationHubAccess
+            {
+                Name = "Sink",
+                AllowedHubToSinkPaths = new[] { "*" },
+                CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
+            }));
+
+            await sinkStore.Maintenance.SendAsync(new PutConnectionStringOperation<RavenConnectionString>(new RavenConnectionString
+            {
+                Database = hubStore.Database,
+                Name = connectionStringName,
+                TopologyDiscoveryUrls = hubStore.Urls
+            }));
+
+            var sinkTask = new PullReplicationAsSink
+            {
+                ConnectionStringName = connectionStringName,
+                Mode = PullReplicationMode.HubToSink,
+                CertificateWithPrivateKey = Convert.ToBase64String(pullCert.Export(X509ContentType.Pfx)),
+                HubName = hubName,
+                AllowedHubToSinkPaths = new[] { "items/blue/*" }
+            };
+
+            var sinkTaskResult = await sinkStore.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(sinkTask));
+
+            await StoreOnHub("items/blue/before-update");
+            await StoreOnHub("items/red/before-update");
+
+            Assert.True(WaitForDocument(sinkStore, "items/blue/before-update", timeout), sinkStore.Identifier);
+            Assert.False(WaitForDocument(sinkStore, "items/red/before-update", filteredTimeout), sinkStore.Identifier);
+
+            sinkTask.TaskId = sinkTaskResult.TaskId;
+            sinkTask.AllowedHubToSinkPaths = new[] { "items/red/*" };
+
+            var updateResult = await sinkStore.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(sinkTask));
+            using (var context = JsonOperationContext.ShortTermSingleUse())
+            {
+                await sinkStore.GetRequestExecutor().ExecuteAsync(new WaitForRaftIndexCommand(updateResult.RaftCommandIndex), context);
+            }
+
+            await StoreOnHubUntilReplicated("items/red/after-update");
+
+            await StoreOnHub("items/blue/after-update");
+            Assert.False(WaitForDocument(sinkStore, "items/blue/after-update", filteredTimeout), sinkStore.Identifier);
+
+            async Task StoreOnHubUntilReplicated(string idPrefix)
+            {
+                for (var i = 0; i < 10; i++)
+                {
+                    var id = $"{idPrefix}-{i}";
+                    await StoreOnHub(id);
+
+                    if (WaitForDocument(sinkStore, id, filteredTimeout))
+                        return;
+                }
+
+                Assert.Fail($"Expected a document under '{idPrefix}' to replicate after updating the HubToSink path filter.");
+            }
+
+            async Task StoreOnHub(string id)
+            {
+                using var session = hubStore.OpenAsyncSession();
+                await session.StoreAsync(new User { Name = id }, id);
+                await session.SaveChangesAsync();
+            }
+        }
+
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task SinkToHubShouldUseUpdatedSinkPathFilter()
+        {
+            const int timeout = 30_000;
+            const int filteredTimeout = 3_000;
+
+            var certificates = Certificates.SetupServerAuthentication();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var hubStore = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+            });
+            using var sinkStore = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+            });
+
+#pragma warning disable SYSLIB0057
+            var pullCert = new X509Certificate2(await File.ReadAllBytesAsync(certificates.ClientCertificate2Path), (string)null,
+                X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
+
+            const string hubName = "filtered-sink-to-hub";
+            var connectionStringName = hubStore.Database + "ConStr";
+
+            await hubStore.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = hubName,
+                Mode = PullReplicationMode.SinkToHub,
+                WithFiltering = true
+            }));
+
+            await hubStore.Maintenance.SendAsync(new RegisterReplicationHubAccessOperation(hubName, new ReplicationHubAccess
+            {
+                Name = "Sink",
+                AllowedSinkToHubPaths = new[] { "*" },
+                CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
+            }));
+
+            await sinkStore.Maintenance.SendAsync(new PutConnectionStringOperation<RavenConnectionString>(new RavenConnectionString
+            {
+                Database = hubStore.Database,
+                Name = connectionStringName,
+                TopologyDiscoveryUrls = hubStore.Urls
+            }));
+
+            var sinkTask = new PullReplicationAsSink
+            {
+                ConnectionStringName = connectionStringName,
+                Mode = PullReplicationMode.SinkToHub,
+                CertificateWithPrivateKey = Convert.ToBase64String(pullCert.Export(X509ContentType.Pfx)),
+                HubName = hubName,
+                AllowedSinkToHubPaths = new[] { "items/blue/*" }
+            };
+
+            var sinkTaskResult = await sinkStore.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(sinkTask));
+
+            await StoreOnSink("items/blue/before-update");
+            await StoreOnSink("items/red/before-update");
+
+            Assert.True(WaitForDocument(hubStore, "items/blue/before-update", timeout), hubStore.Identifier);
+            Assert.False(WaitForDocument(hubStore, "items/red/before-update", filteredTimeout), hubStore.Identifier);
+
+            sinkTask.TaskId = sinkTaskResult.TaskId;
+            sinkTask.AllowedSinkToHubPaths = new[] { "items/red/*" };
+
+            var updateResult = await sinkStore.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(sinkTask));
+            using (var context = JsonOperationContext.ShortTermSingleUse())
+            {
+                await sinkStore.GetRequestExecutor().ExecuteAsync(new WaitForRaftIndexCommand(updateResult.RaftCommandIndex), context);
+            }
+
+            await StoreOnSinkUntilReplicated("items/red/after-update");
+
+            await StoreOnSink("items/blue/after-update");
+            Assert.False(WaitForDocument(hubStore, "items/blue/after-update", filteredTimeout), hubStore.Identifier);
+
+            async Task StoreOnSinkUntilReplicated(string idPrefix)
+            {
+                for (var i = 0; i < 10; i++)
+                {
+                    var id = $"{idPrefix}-{i}";
+                    await StoreOnSink(id);
+
+                    if (WaitForDocument(hubStore, id, filteredTimeout))
+                        return;
+                }
+
+                Assert.Fail($"Expected a document under '{idPrefix}' to replicate after updating the SinkToHub path filter.");
+            }
+
+            async Task StoreOnSink(string id)
+            {
+                using var session = sinkStore.OpenAsyncSession();
+                await session.StoreAsync(new User { Name = id }, id);
+                await session.SaveChangesAsync();
+            }
+        }
+
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
         public async Task Sinks_should_not_update_hubs_change_vector()
         {
             var certificates = Certificates.SetupServerAuthentication();
@@ -930,14 +1175,18 @@ namespace SlowTests.Issues
             using (ctx.OpenReadTransaction())
             {
                 var sink1GlobalCv = DocumentsStorage.GetDatabaseChangeVector(ctx).AsString();
-                Assert.Equal(2, sink1GlobalCv.ToChangeVector().Length);
+                Assert.DoesNotContain("|", sink1GlobalCv);
+                Assert.DoesNotContain(ChangeVectorParser.SinkTag, sink1GlobalCv);
+                Assert.Equal(1, sink1GlobalCv.ToChangeVector().Length);
             }
 
             using (sink2Db.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext ctx))
             using (ctx.OpenReadTransaction())
             {
                 var sink2GlobalCv = DocumentsStorage.GetDatabaseChangeVector(ctx).AsString();
-                Assert.Equal(2, sink2GlobalCv.ToChangeVector().Length);
+                Assert.DoesNotContain("|", sink2GlobalCv);
+                Assert.DoesNotContain(ChangeVectorParser.SinkTag, sink2GlobalCv);
+                Assert.Equal(1, sink2GlobalCv.ToChangeVector().Length);
             }
 
             async Task SetupSink(DocumentStore sinkStore)
@@ -1083,7 +1332,9 @@ namespace SlowTests.Issues
             using (ctx.OpenReadTransaction())
             {
                 var sink1GlobalCv = DocumentsStorage.GetDatabaseChangeVector(ctx).AsString();
-                Assert.Equal(2, sink1GlobalCv.ToChangeVector().Length);
+                Assert.DoesNotContain("|", sink1GlobalCv);
+                Assert.DoesNotContain(ChangeVectorParser.SinkTag, sink1GlobalCv);
+                Assert.Equal(1, sink1GlobalCv.ToChangeVector().Length);
             }
 
             using (var s = hubStore.OpenAsyncSession())
@@ -1091,9 +1342,10 @@ namespace SlowTests.Issues
                 var common = await s.LoadAsync<Propagation>("common");
                 var cv = s.Advanced.GetChangeVectorFor(common);
                 var r = await s.Advanced.Revisions.GetForAsync<Propagation>("common");
+                var version = GetVersionChangeVector(cv);
 
-                Assert.Equal(2, cv.ToChangeVectorList().Count);
-                Assert.Contains("SINK", cv);
+                Assert.Equal(2, version.ToChangeVectorList().Count);
+                Assert.Contains(sink1Db.DbBase64Id, version);
                 Assert.Equal(0, r.Count);
             }
 
@@ -1102,8 +1354,10 @@ namespace SlowTests.Issues
                 var common = await s.LoadAsync<Propagation>("common");
                 var cv = s.Advanced.GetChangeVectorFor(common);
                 var r = await s.Advanced.Revisions.GetForAsync<Propagation>("common");
-                Assert.Equal(2, cv.ToChangeVectorList().Count);
-                Assert.DoesNotContain("SINK", cv);
+                var version = GetVersionChangeVector(cv);
+
+                Assert.Equal(2, version.ToChangeVectorList().Count);
+                Assert.DoesNotContain(ChangeVectorParser.SinkTag, version);
                 Assert.Equal(0, r.Count);
             }
 
@@ -1259,7 +1513,7 @@ namespace SlowTests.Issues
             Assert.True(WaitForDocument<Propagation>(sinkStore1, "foo", x => x.Completed == true));
 
             using (var token = new OperationCancelToken(hubDb.Configuration.Databases.OperationTimeout.AsTimeSpan, hubDb.DatabaseShutdown, CancellationToken.None))
-                await hubDb.DocumentsStorage.RevisionsStorage.EnforceConfigurationAsync(_ => { }, token);
+                await hubDb.DocumentsStorage.RevisionsStorage.EnforceConfigurationAsync(_ => { }, new EnforceRevisionsConfigurationOperation.Parameters { IncludeForceCreated = true }, maxOpsPerSecond: null, token);
 
             using (var s = hubStore.OpenAsyncSession())
             {
@@ -1290,14 +1544,18 @@ namespace SlowTests.Issues
             using (ctx.OpenReadTransaction())
             {
                 var sink1GlobalCv = DocumentsStorage.GetDatabaseChangeVector(ctx).AsString();
-                Assert.Equal(2, sink1GlobalCv.ToChangeVector().Length);
+                Assert.DoesNotContain("|", sink1GlobalCv);
+                Assert.DoesNotContain(ChangeVectorParser.SinkTag, sink1GlobalCv);
+                Assert.Equal(1, sink1GlobalCv.ToChangeVector().Length);
             }
 
             using (sink2Db.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext ctx))
             using (ctx.OpenReadTransaction())
             {
                 var sink2GlobalCv = DocumentsStorage.GetDatabaseChangeVector(ctx).AsString();
-                Assert.Equal(2, sink2GlobalCv.ToChangeVector().Length);
+                Assert.DoesNotContain("|", sink2GlobalCv);
+                Assert.DoesNotContain(ChangeVectorParser.SinkTag, sink2GlobalCv);
+                Assert.Equal(1, sink2GlobalCv.ToChangeVector().Length);
             }
 
             using (var s = hubStore.OpenAsyncSession())
@@ -1352,13 +1610,173 @@ namespace SlowTests.Issues
             }
         }
 
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task HubToSink_ShouldUseSenderDeclaredFilteredBoundary_WhenSinkTaskAcceptsAll()
+        {
+            var certificates = Certificates.SetupServerAuthentication();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var hub = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert
+            });
+            using var sink = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert
+            });
+
+            using (var session = hub.OpenAsyncSession())
+            {
+                await session.StoreAsync(new User { Name = "included" }, "items/include/1");
+                await session.StoreAsync(new User { Name = "filtered" }, "items/filtered/1");
+                await session.SaveChangesAsync();
+            }
+
+#pragma warning disable SYSLIB0057
+            var pullCert = new X509Certificate2(await File.ReadAllBytesAsync(certificates.ClientCertificate2Path), (string)null,
+                X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
+
+            await hub.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = "filtered",
+                Mode = PullReplicationMode.HubToSink,
+                WithFiltering = true
+            }));
+
+            await hub.Maintenance.SendAsync(new RegisterReplicationHubAccessOperation("filtered", new ReplicationHubAccess
+            {
+                Name = "filtered",
+                CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
+                AllowedHubToSinkPaths = new[] { "items/include/*" }
+            }));
+
+            await sink.Maintenance.SendAsync(new PutConnectionStringOperation<RavenConnectionString>(new RavenConnectionString
+            {
+                Database = hub.Database,
+                Name = hub.Database + "ConStr",
+                TopologyDiscoveryUrls = hub.Urls
+            }));
+            await sink.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(new PullReplicationAsSink
+            {
+                ConnectionStringName = hub.Database + "ConStr",
+                Mode = PullReplicationMode.HubToSink,
+                CertificateWithPrivateKey = Convert.ToBase64String(pullCert.Export(X509ContentType.Pfx)),
+                HubName = "filtered",
+                AllowedHubToSinkPaths = new[] { "*" }
+            }));
+
+            Assert.True(WaitForDocument(sink, "items/include/1"));
+
+            var hubDatabaseId = (await GetDatabase(Server, hub.Database)).DbBase64Id;
+            var sinkDatabaseId = (await GetDatabase(Server, sink.Database)).DbBase64Id;
+
+            using (var session = sink.OpenAsyncSession())
+            {
+                var included = await session.LoadAsync<User>("items/include/1");
+                var filtered = await session.LoadAsync<User>("items/filtered/1");
+
+                Assert.NotNull(included);
+                Assert.Null(filtered);
+                AssertFilteredItemChangeVectorHasExpectedShape(session.Advanced.GetChangeVectorFor(included));
+            }
+
+            var stats = await sink.Maintenance.SendAsync(new GetStatisticsOperation());
+            Assert.DoesNotContain("|", stats.DatabaseChangeVector);
+            Assert.DoesNotContain(hubDatabaseId, stats.DatabaseChangeVector);
+            Assert.Contains(sinkDatabaseId, stats.DatabaseChangeVector);
+        }
+
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task SinkToHub_ShouldUseSenderDeclaredFilteredBoundary_WhenHubAccessAcceptsAll()
+        {
+            var certificates = Certificates.SetupServerAuthentication();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var hub = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert
+            });
+            using var sink = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert
+            });
+
+            using (var session = sink.OpenAsyncSession())
+            {
+                await session.StoreAsync(new User { Name = "included" }, "items/include/1");
+                await session.StoreAsync(new User { Name = "filtered" }, "items/filtered/1");
+                await session.SaveChangesAsync();
+            }
+
+#pragma warning disable SYSLIB0057
+            var pullCert = new X509Certificate2(await File.ReadAllBytesAsync(certificates.ClientCertificate2Path), (string)null,
+                X509KeyStorageFlags.Exportable);
+#pragma warning restore SYSLIB0057
+
+            await hub.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = "filtered",
+                Mode = PullReplicationMode.SinkToHub,
+                WithFiltering = true
+            }));
+
+            await hub.Maintenance.SendAsync(new RegisterReplicationHubAccessOperation("filtered", new ReplicationHubAccess
+            {
+                Name = "filtered",
+                CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
+                AllowedSinkToHubPaths = new[] { "*" }
+            }));
+
+            await sink.Maintenance.SendAsync(new PutConnectionStringOperation<RavenConnectionString>(new RavenConnectionString
+            {
+                Database = hub.Database,
+                Name = hub.Database + "ConStr",
+                TopologyDiscoveryUrls = hub.Urls
+            }));
+            await sink.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(new PullReplicationAsSink
+            {
+                ConnectionStringName = hub.Database + "ConStr",
+                Mode = PullReplicationMode.SinkToHub,
+                CertificateWithPrivateKey = Convert.ToBase64String(pullCert.Export(X509ContentType.Pfx)),
+                HubName = "filtered",
+                AllowedSinkToHubPaths = new[] { "items/include/*" }
+            }));
+
+            Assert.True(WaitForDocument(hub, "items/include/1"));
+
+            var hubDatabaseId = (await GetDatabase(Server, hub.Database)).DbBase64Id;
+            var sinkDatabaseId = (await GetDatabase(Server, sink.Database)).DbBase64Id;
+
+            using (var session = hub.OpenAsyncSession())
+            {
+                var included = await session.LoadAsync<User>("items/include/1");
+                var filtered = await session.LoadAsync<User>("items/filtered/1");
+
+                Assert.NotNull(included);
+                Assert.Null(filtered);
+                AssertFilteredItemChangeVectorHasExpectedShape(session.Advanced.GetChangeVectorFor(included));
+            }
+
+            var stats = await hub.Maintenance.SendAsync(new GetStatisticsOperation());
+            Assert.DoesNotContain("|", stats.DatabaseChangeVector);
+            Assert.DoesNotContain(sinkDatabaseId, stats.DatabaseChangeVector);
+            Assert.Contains(hubDatabaseId, stats.DatabaseChangeVector);
+        }
+
         private static async Task AssertOnSink(IAsyncDocumentSession s, string id)
         {
             var doc = await s.LoadAsync<Propagation>(id);
             var cv = s.Advanced.GetChangeVectorFor(doc);
             var r = await s.Advanced.Revisions.GetForAsync<Propagation>(id);
-            Assert.Equal(2, cv.ToChangeVectorList().Count);
-            Assert.DoesNotContain("SINK", cv);
+            AssertFilteredItemChangeVectorHasExpectedShape(cv);
+            Assert.DoesNotContain(ChangeVectorParser.SinkTag, cv);
             Assert.Equal(0, r.Count);
         }
 
@@ -1368,9 +1786,32 @@ namespace SlowTests.Issues
             var cv = s.Advanced.GetChangeVectorFor(doc);
             var r = await s.Advanced.Revisions.GetForAsync<Propagation>(id);
 
-            Assert.Equal(2, cv.ToChangeVectorList().Count);
-            Assert.Contains("SINK", cv);
+            AssertFilteredItemChangeVectorHasExpectedShape(cv);
+            Assert.DoesNotContain(ChangeVectorParser.SinkTag, cv);
             Assert.Equal(0, r.Count);
+        }
+
+        private static void AssertFilteredItemChangeVectorHasExpectedShape(string changeVector)
+        {
+            var separator = changeVector.IndexOf('|');
+            Assert.True(separator > 0, $"Expected filtered item change vector to contain Order|Version separator. CV='{changeVector}'.");
+
+            var order = changeVector[..separator];
+            var version = changeVector[(separator + 1)..];
+            var orderEntries = order.ToChangeVectorList();
+            var versionEntries = version.ToChangeVectorList();
+
+            Assert.True(
+                orderEntries is { Count: > 0 },
+                $"Expected Order to contain receiver-local order entries. Order='{order}', CV='{changeVector}'.");
+
+            Assert.True(
+                orderEntries.All(x => x.NodeTag != ChangeVectorParser.SinkInt),
+                $"Expected Order not to contain SINK marker entries. Order='{order}', CV='{changeVector}'.");
+
+            Assert.True(
+                versionEntries is { Count: > 0 },
+                $"Expected Version to keep lineage entries. Version='{version}', CV='{changeVector}'.");
         }
 
         [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates | RavenTestCategory.BackupExportImport)]
@@ -1516,6 +1957,93 @@ namespace SlowTests.Issues
             Assert.Contains("Either AllowedSinkToHubPaths or AllowedHubToSinkPaths must have a value, but both were null or empty", ex.InnerException.Message);
         }
 
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task Can_setup_filtered_replication_trimming_whitespace_in_sink_paths()
+        {
+            var certificates = Certificates.SetupServerAuthentication();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var hubStore = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+            });
+            using var sinkStore = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+            });
+
+            var pullCert = certificates.ClientCertificate2.Value;
+            await hubStore.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = "pull",
+                Mode = PullReplicationMode.SinkToHub | PullReplicationMode.HubToSink,
+                WithFiltering = true
+            }));
+
+            await sinkStore.Maintenance.SendAsync(new PutConnectionStringOperation<RavenConnectionString>(new RavenConnectionString
+            {
+                Database = hubStore.Database,
+                Name = "HubConStr",
+                TopologyDiscoveryUrls = hubStore.Urls
+            }));
+
+            var result = await sinkStore.Maintenance.SendAsync(new UpdatePullReplicationAsSinkOperation(new PullReplicationAsSink
+            {
+                ConnectionStringName = "HubConStr",
+                CertificateWithPrivateKey = Convert.ToBase64String(pullCert.Export(X509ContentType.Pfx)),
+                HubName = "pull",
+                Mode = PullReplicationMode.SinkToHub | PullReplicationMode.HubToSink,
+                AllowedHubToSinkPaths = [" issues/ABCD/* ", "   "],
+                AllowedSinkToHubPaths = [" DeliveryApprovals/* ", "\t"]
+            }));
+
+            var sinkTask = (OngoingTaskPullReplicationAsSink)await sinkStore.Maintenance.SendAsync(
+                new GetOngoingTaskInfoOperation(result.TaskId, OngoingTaskType.PullReplicationAsSink));
+
+            Assert.Equal(new[] { "issues/ABCD/*" }, sinkTask.AllowedHubToSinkPaths);
+            Assert.Equal(new[] { "DeliveryApprovals/*" }, sinkTask.AllowedSinkToHubPaths);
+        }
+
+        [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]
+        public async Task Must_use_access_paths_if_filtering_is_set_even_when_values_trim_to_empty()
+        {
+            var certificates = Certificates.SetupServerAuthentication();
+            var dbNameA = GetDatabaseName();
+            var adminCert = Certificates.RegisterClientCertificate(certificates.ServerCertificateForCommunication.Value, certificates
+                .ClientCertificate1.Value, new Dictionary<string, DatabaseAccess>(), SecurityClearance.ClusterAdmin);
+
+            using var storeA = GetDocumentStore(new Options
+            {
+                AdminCertificate = adminCert,
+                ClientCertificate = adminCert,
+                ModifyDatabaseName = s => dbNameA
+            });
+
+            var pullCert = certificates.ClientCertificate2.Value;
+            await storeA.Maintenance.SendAsync(new PutPullReplicationAsHubOperation(new PullReplicationDefinition
+            {
+                Name = "pull",
+                WithFiltering = true
+            }));
+
+            var ex = await Assert.ThrowsAsync<RavenException>(async () =>
+               await storeA.Maintenance.SendAsync(new RegisterReplicationHubAccessOperation("pull",
+                   new ReplicationHubAccess
+                   {
+                       Name = "Arava",
+                       CertificateBase64 = Convert.ToBase64String(pullCert.Export(X509ContentType.Cert)),
+                       AllowedHubToSinkPaths = ["   ", "\t"],
+                       AllowedSinkToHubPaths = [" "]
+                   })
+               ));
+
+            Assert.True(ex.InnerException != null, "ex.InnerException is null but expected an exception");
+            Assert.Contains("Either AllowedSinkToHubPaths or AllowedHubToSinkPaths must have a value, but both were null or empty", ex.InnerException.Message);
+        }
+
         [RavenFact(RavenTestCategory.Replication)]
         public async Task Can_pull_and_push_with_first_transaction_on_sink()
         {
@@ -1547,13 +2075,13 @@ namespace SlowTests.Issues
 
             using (var session = sink.OpenAsyncSession())
             {
-                var user = new User { Name = "Grisha" };
+                var user = new User { Name = "Grisha", Age = 1 };
                 await session.StoreAsync(user, usersDocId1);
                 await session.SaveChangesAsync();
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
                 Assert.True(changeVector.Contains(sinkDatabaseId));
-    }
+            }
 
 #pragma warning disable SYSLIB0057
             var pullCert = new X509Certificate2(await File.ReadAllBytesAsync(hubCertificates.ClientCertificate2Path), (string)null,
@@ -1600,22 +2128,26 @@ namespace SlowTests.Issues
                 Assert.NotNull(user);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(sinkDatabaseId));
 
                 var stats = await hub.Maintenance.SendAsync(new GetStatisticsOperation());
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
 
                 user.Age = age;
                 await session.SaveChangesAsync();
                 changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
+                version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(sinkDatabaseId));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
 
                 stats = await hub.Maintenance.SendAsync(new GetStatisticsOperation());
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
-}
+            }
 
             var ageVal = await WaitForValueAsync(async () =>
             {
@@ -1632,11 +2164,13 @@ namespace SlowTests.Issues
                 var user = await session.LoadAsync<User>(usersDocId1);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.False(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(sinkDatabaseId));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
 
                 var stats = await sink.Maintenance.SendAsync(new GetStatisticsOperation());
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
             }
         }
@@ -1730,17 +2264,19 @@ namespace SlowTests.Issues
                 Assert.NotNull(user);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(sinkClusterId));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(sinkClusterId));
 
                 await VerifyDatabaseChangeVector(hub);
 
                 user.Age = age;
                 await session.SaveChangesAsync();
                 changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(sinkClusterId));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
+                version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(sinkClusterId));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
 
                 await VerifyDatabaseChangeVector(hub);
             }
@@ -1760,11 +2296,12 @@ namespace SlowTests.Issues
                 var user = await session.LoadAsync<User>(usersDocId1);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.TrxnTag));
-                Assert.True(changeVector.Contains(ChangeVectorParser.RaftTag));
-                Assert.False(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(sinkClusterId));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.True(version.Contains(ChangeVectorParser.TrxnTag));
+                Assert.True(version.Contains(ChangeVectorParser.RaftTag));
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(sinkClusterId));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
 
                 await VerifyDatabaseChangeVector(sink);
             }
@@ -1784,6 +2321,7 @@ namespace SlowTests.Issues
             {
                 var stats = await store.Maintenance.SendAsync(new GetStatisticsOperation());
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.TrxnTag));
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
                 Assert.False(stats.DatabaseChangeVector.Contains(sinkClusterId));
             }
@@ -1873,20 +2411,24 @@ namespace SlowTests.Issues
                 Assert.NotNull(user);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.False(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
 
                 var stats = await hub.Maintenance.SendAsync(new GetStatisticsOperation());
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
 
                 user.Age = age;
                 await session.SaveChangesAsync();
                 changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.False(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
+                version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
+                Assert.True(version.Contains(sinkDatabaseId));
 
                 stats = await hub.Maintenance.SendAsync(new GetStatisticsOperation());
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
             }
 
@@ -1905,11 +2447,13 @@ namespace SlowTests.Issues
                 var user = await session.LoadAsync<User>(usersDocId1);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(hubDatabaseIds.Any(id => changeVector.Contains(id)));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(hubDatabaseIds.Any(id => version.Contains(id)));
+                Assert.True(version.Contains(sinkDatabaseId));
 
                 var stats = await hub.Maintenance.SendAsync(new GetStatisticsOperation());
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
             }
         }
@@ -2001,17 +2545,19 @@ namespace SlowTests.Issues
                 Assert.NotNull(user);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.TrxnTag));
-                Assert.True(changeVector.Contains(hubClusterId));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.True(version.Contains(ChangeVectorParser.TrxnTag));
+                Assert.True(version.Contains(hubClusterId));
 
                 await VerifyDatabaseChangeVector(sink);
 
                 user.Age = age;
                 await session.SaveChangesAsync();
                 changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.TrxnTag));
-                Assert.True(changeVector.Contains(hubClusterId));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
+                version = GetVersionChangeVector(changeVector);
+                Assert.True(version.Contains(ChangeVectorParser.TrxnTag));
+                Assert.True(version.Contains(hubClusterId));
+                Assert.True(version.Contains(sinkDatabaseId));
 
                 await VerifyDatabaseChangeVector(sink);
             }
@@ -2031,11 +2577,12 @@ namespace SlowTests.Issues
                 var user = await session.LoadAsync<User>(usersDocId1);
 
                 var changeVector = session.Advanced.GetChangeVectorFor(user);
-                Assert.True(changeVector.Contains(ChangeVectorParser.TrxnTag));
-                Assert.True(changeVector.Contains(ChangeVectorParser.RaftTag));
-                Assert.True(changeVector.Contains(ChangeVectorParser.SinkTag));
-                Assert.True(changeVector.Contains(hubClusterId));
-                Assert.True(changeVector.Contains(sinkDatabaseId));
+                var version = GetVersionChangeVector(changeVector);
+                Assert.True(version.Contains(ChangeVectorParser.TrxnTag));
+                Assert.True(version.Contains(ChangeVectorParser.RaftTag));
+                Assert.False(version.Contains(ChangeVectorParser.SinkTag));
+                Assert.True(version.Contains(hubClusterId));
+                Assert.True(version.Contains(sinkDatabaseId));
 
                 await VerifyDatabaseChangeVector(hub);
             }
@@ -2055,9 +2602,18 @@ namespace SlowTests.Issues
             {
                 var stats = await store.Maintenance.SendAsync(new GetStatisticsOperation());
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.TrxnTag));
+                Assert.DoesNotContain("|", stats.DatabaseChangeVector);
                 Assert.False(stats.DatabaseChangeVector.Contains(ChangeVectorParser.SinkTag));
                 Assert.False(stats.DatabaseChangeVector.Contains(hubClusterId));
             }
+        }
+
+        private static string GetVersionChangeVector(string changeVector)
+        {
+            if (string.IsNullOrEmpty(changeVector))
+                return changeVector;
+
+            return new ChangeVector(changeVector, NoChangeVectorContext.Instance).Version.AsString();
         }
 
         [RavenFact(RavenTestCategory.Replication | RavenTestCategory.Certificates)]

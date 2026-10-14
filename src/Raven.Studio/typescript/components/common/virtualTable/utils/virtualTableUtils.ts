@@ -1,7 +1,13 @@
 import { virtualTableConstants } from "components/common/virtualTable/utils/virtualTableConstants";
 
-const { defaultRowHeightInPx, headerHeightInPx, paddingInPx, scrollbarWidthInPx, scrollbarHeightInPx } =
-    virtualTableConstants;
+const {
+    defaultRowHeightInPx,
+    headerHeightInPx,
+    paddingInPx,
+    scrollbarWidthInPx,
+    scrollbarHeightInPx,
+    minTableHeightInPx,
+} = virtualTableConstants;
 
 interface TableBodyWidthOptions {
     isWithoutTablePadding?: boolean;
@@ -38,18 +44,20 @@ function getCellSizeProvider(tableWidthInPx = 0) {
     return (percentage: number) => Math.floor((tableWidthInPx * percentage) / 100);
 }
 
-function getHeightInPx(rowsCount: number, maxHeightInPx: number): number {
+function getHeightInPx(rowsCount: number, maxHeightInPx: number, rowHeight = defaultRowHeightInPx): number {
     const calculatedHeightInPx =
-        Math.max(defaultRowHeightInPx, rowsCount * defaultRowHeightInPx) +
-        paddingInPx +
-        headerHeightInPx +
-        scrollbarHeightInPx;
+        Math.max(rowHeight, rowsCount * rowHeight) + paddingInPx + headerHeightInPx + scrollbarHeightInPx;
 
     return Math.min(calculatedHeightInPx, maxHeightInPx);
+}
+
+function getTableContainerHeightInPx(heightInPx: number, isPaddingDisabled = false) {
+    return Math.max(heightInPx - (isPaddingDisabled ? 0 : paddingInPx), minTableHeightInPx);
 }
 
 export const virtualTableUtils = {
     getCellSizeProvider,
     getTableBodyWidth,
     getHeightInPx,
+    getTableContainerHeightInPx,
 };

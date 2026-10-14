@@ -27,6 +27,7 @@ using Microsoft.AspNetCore.Http.Features.Authentication;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -86,6 +87,8 @@ using Sparrow.Utils;
 using Voron;
 using DateTime = System.DateTime;
 using Raven.Server.Monitoring.OpenTelemetry;
+using Sparrow.Platform;
+using static Raven.Client.ServerWide.Tcp.TcpConnectionHeaderMessage.AuthorizationInfo.AuthorizeMethod;
 using Constants = Sparrow.Global.Constants;
 using TelemetryConstants = Raven.Server.Monitoring.OpenTelemetry.Constants;
 using ClientConstants = Raven.Client.Constants;
@@ -202,7 +205,7 @@ namespace Raven.Server
             // In unsecured + HTTP/2-only (h2c) mode, Kestrel expects HTTP/2 prior-knowledge (no HTTP/1.1 upgrade).
             // Ensure RequestExecutor uses RequestVersionExact so server-to-self calls succeed, without mutating frozen conventions instances.
             if (Configuration.Http.Protocols == HttpProtocols.Http2 && Certificate.ServerCertificate == null)
-                DocumentConventions.DefaultHttpVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+                DocumentConventions.DefaultHttpVersionPolicy = HttpVersionPolicy.RequestVersionExact;
 
             CpuUsageCalculator = string.IsNullOrEmpty(Configuration.Monitoring.CpuUsageMonitorExec)
                 ? CpuHelper.GetOSCpuUsageCalculator()
@@ -338,6 +341,11 @@ namespace Raven.Server
                 }
 
                 var webHostBuilder = new HostBuilder()
+                    .ConfigureAppConfiguration(builder =>
+                    {
+                        if (Configuration.Monitoring.OpenTelemetry.Enabled)
+                            builder.Add(new OpenTelemetryEnvironmentVariablesReader());
+                    })
                     .ConfigureWebHost(configure =>
                     {
                         configure.CaptureStartupErrors(captureStartupErrors: true)
@@ -539,11 +547,12 @@ namespace Raven.Server
             openTelemetryBuilder.WithMetrics(ConfigureMetrics);
             void ConfigureMetrics(MeterProviderBuilder builder)
             {
-                builder.ConfigureResource(x => x.AddEnvironmentVariableDetector());
                 var configuration = Configuration.Monitoring.OpenTelemetry;
+                var serviceName = configuration.ServiceName;
+                var serviceNamespace = configuration.ServiceNamespace;
                 builder.SetResourceBuilder(
                     ResourceBuilder.CreateDefault()
-                        .AddService("server", "ravendb", serviceInstanceId: serviceInstanceId));
+                        .AddService(serviceName, serviceNamespace, serviceInstanceId: serviceInstanceId));
                 if (configuration.AspNetCoreInstrumentationMetersEnabled)
                     builder.AddAspNetCoreInstrumentation();
                 if (configuration.RuntimeInstrumentationMetersEnabled)
@@ -1370,8 +1379,16 @@ namespace Raven.Server
                     Configuration.Security.CertificateRenewExecArguments,
                     ServerStore.GetLicenseType(),
                     ServerStore.Configuration.Security.CertificateValidationKeyUsages);
-
-                return CertificateLoaderUtil.CreateCertificate(certificate.Export(X509ContentType.Pfx), flags: CertificateLoaderUtil.FlagsForPersist);
+                
+                var flags = CertificateLoaderUtil.FlagsForPersist;
+        
+                // macOS Keychain rigidly blocks silent exports of persisted private keys.
+                // Keeping the key in memory (Ephemeral) bypasses the Keychain restriction.
+                if (PlatformDetails.RunningOnMacOsx)
+                {
+                    flags = CertificateLoaderUtil.FlagsForExport;
+                }
+                return CertificateLoaderUtil.CreateCertificate(certificate.Export(X509ContentType.Pfx), flags: flags);
             }
             catch (Exception e)
             {
@@ -1476,7 +1493,16 @@ namespace Raven.Server
             X509Certificate2 refreshedCertificate;
             try
             {
-                refreshedCertificate = CertificateLoaderUtil.CreateCertificate(newCertBytes, flags: CertificateLoaderUtil.FlagsForPersist);
+                var flags = CertificateLoaderUtil.FlagsForPersist;
+        
+                // macOS Keychain blocks the export of private keys loaded with PersistKeySet.
+                // We must load it as Ephemeral (FlagsForExport) so StartCertificateReplicationAsync can broadcast it.
+                if (PlatformDetails.RunningOnMacOsx)
+                {
+                    flags = CertificateLoaderUtil.FlagsForExport;
+                }
+
+                refreshedCertificate = CertificateLoaderUtil.CreateCertificate(newCertBytes, flags: flags);
             }
             catch (Exception e)
             {
@@ -1493,30 +1519,26 @@ namespace Raven.Server
 
         public (bool ShouldRenew, DateTime RenewalDate) CalculateRenewalDate(CertificateUtils.CertificateHolder currentCertificate, bool forceRenew)
         {
-            // we want to setup all the renewals for Saturdays, 30 days before expiration. This is done to reduce the amount of cert renewals that are counted against our renewals
-            // but if we have less than 20 days or user asked to force-renew, we'll try anyway.
+            // we want to setup the renewal for the first possible date, AcmeRenewalThresholdPercentage (default: 30%) of the certificate lifetime before expiration
+            // but if we're already past that threshold or the user asked to force-renew, we'll try anyway.
 
             if (forceRenew)
                 return (true, DateTime.UtcNow.Date);
 
             var remainingDays = (currentCertificate.ServerCertificate.NotAfter - Time.GetUtcNow().ToLocalTime()).TotalDays;
             var daysToRenewBeforeExpiration = CalculateDaysToRenewBeforeExpiration(Certificate.ServerCertificate);
-            
+
             if (remainingDays <= daysToRenewBeforeExpiration)
             {
                 return (true, DateTime.UtcNow.Date);
             }
 
-            var firstPossibleDate = currentCertificate.ServerCertificate.NotAfter.ToUniversalTime().AddDays(-daysToRenewBeforeExpiration);
+            var firstPossibleDate = currentCertificate.ServerCertificate.NotAfter.ToUniversalTime().AddDays(-daysToRenewBeforeExpiration).Date;
 
-            // We can do this because saturday is last in the DayOfWeek enum
-            var daysUntilSaturday = DayOfWeek.Saturday - firstPossibleDate.DayOfWeek;
-            var firstPossibleSaturday = firstPossibleDate.AddDays(daysUntilSaturday);
+            if (firstPossibleDate == DateTime.UtcNow.Date)
+                return (true, firstPossibleDate);
 
-            if (firstPossibleSaturday.Date == DateTime.UtcNow.Date)
-                return (true, firstPossibleSaturday.Date);
-
-            return (false, firstPossibleSaturday.Date);
+            return (false, firstPossibleDate);
         }
 
         public async Task StartCertificateReplicationAsync(X509Certificate2 newCertificate, string password, bool replaceImmediately, string raftRequestId)
@@ -1560,7 +1582,8 @@ namespace Raven.Server
                         NotAfter = Certificate.ServerCertificate.NotAfter,
                         NotBefore = Certificate.ServerCertificate.NotBefore,
                         Name = "Old Server Certificate - can delete",
-                        SecurityClearance = SecurityClearance.ClusterNode
+                        SecurityClearance = SecurityClearance.ClusterNode,
+                        Usage = CertificateUsage.RavenServer
                     }, $"{raftRequestId}/put-old-certificate"));
 
                 var res = await ServerStore.PutValueInClusterAsync(new PutCertificateCommand(newCertificate.Thumbprint,
@@ -1572,7 +1595,8 @@ namespace Raven.Server
                         NotAfter = newCertificate.NotAfter,
                         NotBefore = newCertificate.NotBefore,
                         Name = "Server Certificate",
-                        SecurityClearance = SecurityClearance.ClusterNode
+                        SecurityClearance = SecurityClearance.ClusterNode,
+                        Usage = CertificateUsage.RavenServer
                     }, $"{raftRequestId}/put-new-certificate"));
 
                 await ServerStore.Cluster.WaitForIndexNotification(res.Index);
@@ -1801,6 +1825,10 @@ namespace Raven.Server
             public CertificateDefinition Definition;
             public int WrittenToAuditLog;
 
+            public bool IsSsoAuthenticated;
+            public string SsoUserIdentity;
+            public string SsoServerPublicKeyPinningHash;
+
             public readonly DateTime CreatedAt = SystemTime.UtcNow;
 
             public AuthenticateConnection(TwoFactor twoFactor)
@@ -1927,7 +1955,11 @@ namespace Raven.Server
             {
                 Definition = definition;
 
-                if (definition.SecurityClearance == SecurityClearance.ClusterAdmin)
+                if (definition.Disabled)
+                {
+                    Status = AuthenticationStatus.UnfamiliarCertificate;
+                }
+                else if (definition.SecurityClearance == SecurityClearance.ClusterAdmin)
                 {
                     Status = AuthenticationStatus.ClusterAdmin;
                 }
@@ -1964,6 +1996,10 @@ namespace Raven.Server
             {
                 authenticationStatus.Status = AuthenticationStatus.NoCertificateProvided;
             }
+            else if (IsServerCertificate(certificate))
+            {
+                authenticationStatus.Status = AuthenticationStatus.ClusterAdmin;
+            }
             else if (certificate.NotAfter.ToUniversalTime() < DateTime.UtcNow)
             {
                 authenticationStatus.Status = AuthenticationStatus.Expired;
@@ -1971,10 +2007,6 @@ namespace Raven.Server
             else if (certificate.NotBefore.ToUniversalTime() > DateTime.UtcNow)
             {
                 authenticationStatus.Status = AuthenticationStatus.NotYetValid;
-            }
-            else if (IsServerCertificate(certificate))
-            {
-                authenticationStatus.Status = AuthenticationStatus.ClusterAdmin;
             }
             else if (wellKnown != null && wellKnown.Contains(certificate.Thumbprint, StringComparer.OrdinalIgnoreCase))
             {
@@ -2033,6 +2065,11 @@ namespace Raven.Server
                         MaybeAllowConnectionBasedOnPinningHash(certificate, ctx, ref authenticationStatus, ref cert, connectionInfo);
                     }
 
+                    if (cert == null && ServerStore.LicenseManager.LicenseStatus.HasSso)
+                    {
+                        MaybeAllowConnectionBasedOnSsoServer(certificate, ctx, ref authenticationStatus, ref cert, connectionInfo, log);
+                    }
+
                     if (cert != null)
                     {
                         var definition = JsonDeserializationServer.CertificateDefinition(cert);
@@ -2041,7 +2078,12 @@ namespace Raven.Server
 
                         var hasTwoFactorKey = cert.TryGet(nameof(PutCertificateCommand.TwoFactorAuthenticationKey), out string _);
 
-                        authenticationStatus.RequiresTwoFactor = hasTwoFactorKey;
+                        // SSO-authenticated connections skip RavenDB's 2FA by design: RavenDB cannot enforce a
+                        // second factor on the identity provider's side, so multi-factor enforcement is the SSO
+                        // server's responsibility. This means a high-clearance (Operator/ClusterAdmin) SSO user gets
+                        // that access with no RavenDB-side second factor, so the SSO provider MUST be configured to
+                        // require MFA for those identities. The Studio surfaces a warning when creating such a user.
+                        authenticationStatus.RequiresTwoFactor = hasTwoFactorKey && authenticationStatus.IsSsoAuthenticated == false;
 
                         if (authenticationStatus.RequiresTwoFactor && TwoFactor.ValidateTwoFactorConnectionLimits(certificate.Thumbprint) == false)
                         {
@@ -2073,6 +2115,9 @@ namespace Raven.Server
 
             foreach (var certDef in certificatesWithSameHash.OrderByDescending(x => x.NotAfter))
             {
+                if (certDef.Disabled)
+                    continue;
+
                 // Hash is good, let's validate it was signed by a known issuer, otherwise users can use the private key to register a new cert with a different issuer.
                 using (var goodKnownCert = CertificateLoaderUtil.CreateCertificate(Convert.FromBase64String(certDef.Certificate)))
                 {
@@ -2110,7 +2155,8 @@ namespace Raven.Server
                 Thumbprint = certificate.Thumbprint,
                 PublicKeyPinningHash = pinningHash,
                 NotAfter = certificate.NotAfter,
-                NotBefore = certificate.NotBefore
+                NotBefore = certificate.NotBefore,
+                Usage = certWithSameHash.Usage
             };
 
             cert = ServerStore.Cluster.GetCertificateByThumbprint(ctx, certificate.Thumbprint) ??
@@ -2118,19 +2164,7 @@ namespace Raven.Server
             if (cert != null)
                 return;
 
-            // This command will discard leftover certificates after the new certificate is saved.
-            GC.KeepAlive(Task.Run(async () =>
-            {
-                try
-                {
-                    await ServerStore.SendToLeaderAsync(new PutCertificateWithSamePinningHashCommand(certificate.Thumbprint, newCertDef, RaftIdGenerator.NewId()));
-                }
-                catch (Exception e)
-                {
-                    if (Logger.IsInfoEnabled)
-                        Logger.Info($"Failed to run command '{nameof(PutCertificateWithSamePinningHashCommand)}'.", e);
-                }
-            }, ServerStore.ServerShutdown));
+            RegisterCertificateWithSamePinningHashInBackground(newCertDef);
 
             if (_auditLogger.IsAuditEnabled)
                 _auditLogger.Audit(
@@ -2142,6 +2176,261 @@ namespace Raven.Server
             cert = ctx.ReadObject(newCertDef.ToJson(), "Client/Certificate/Definition");
         }
 
+        private void MaybeAllowConnectionBasedOnSsoServer(X509Certificate2 certificate,
+            TransactionOperationContext ctx,
+            ref AuthenticateConnection authenticationStatus,
+            ref BlittableJsonReaderObject cert,
+            object connectionInfo,
+            StringBuilder log)
+        {
+            // The SSO user identity is carried in a custom OID extension on the client certificate and does not
+            // depend on which SSO server signed it - read it first, before any table scan. A certificate without
+            // this extension cannot be an SSO client certificate, so we skip the SSO lookup entirely.
+            var ssoUserIdExtension = certificate.Extensions[Raven.Client.Constants.Certificates.SsoUserIdExtensionOid];
+            if (ssoUserIdExtension == null)
+                return;
+
+            var payload = CertificateUtils.DecodeSsoUserIdExtension(ssoUserIdExtension.RawData);
+            if (payload.IsEmpty)
+            {
+                if (_auditLogger.IsAuditEnabled)
+                    _auditLogger.Audit(
+                        $"Connection from {GetRemoteAddress(connectionInfo)} with certificate '{certificate.GetDisplayName()} ({certificate.Thumbprint})' " +
+                        $"has a malformed or unrecognized SSO user ID extension.");
+                return;
+            }
+
+            // The SSO server embeds the certificate it signs with in every client certificate it issues. SSO server
+            // certificates are typically renewed with the same key (e.g. Let's Encrypt with --reuse-key), so the
+            // registered certificate may be an older issuance of that key - possibly already expired.
+            using var embeddedSsoServerCert = TryGetEmbeddedSsoServerCertificate(certificate);
+            var embeddedSsoServerCertPinningHash = embeddedSsoServerCert?.GetPublicKeyPinningHash();
+
+            // Find the single SSO server whose certificate signed this client certificate. There is typically a
+            // single SSO server cert, so iterating and parsing them inline per request is cheap.
+            CertificateDefinition signingSsoServer = null;
+            foreach (var ssoServerDef in ServerStore.Cluster.GetSsoServerCertificates(ctx))
+            {
+                if (ssoServerDef.Disabled || string.IsNullOrEmpty(ssoServerDef.Certificate))
+                    continue;
+
+                using var registeredSsoServerCert = CertificateLoaderUtil.CreateCertificate(Convert.FromBase64String(ssoServerDef.Certificate));
+
+                // When the embedded certificate carries the registered key, validate against it - it is the exact certificate
+                // that signed the client certificate. Whether an expired trust anchor fails the chain is platform dependent
+                // (OpenSSL 3 ignores it, Windows does not), so a stale registered certificate must not be used as the anchor.
+                // The issuer is pinned to the registered public key below either way.
+                var ssoServerCert = embeddedSsoServerCert != null &&
+                                    CertificateUtils.PinningHashEquals(embeddedSsoServerCertPinningHash, ssoServerDef.PublicKeyPinningHash)
+                    ? embeddedSsoServerCert
+                    : registeredSsoServerCert;
+
+                using var chain = new X509Chain(false);
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                chain.ChainPolicy.DisableCertificateDownloads = true;
+                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+
+                // CustomRootTrust requires the chain to terminate at a self-signed certificate in CustomTrustStore,
+                // but the SSO server certificate may itself be CA-signed (e.g. issued by Let's Encrypt). In that case
+                // the chain builder does not stop at it — it continues upward through the CA's intermediates until it
+                // reaches the CA root, which is not in our CustomTrustStore, causing Build() to return false with
+                // UntrustedRoot. AllowUnknownCertificateAuthority suppresses that failure so Build() succeeds.
+                // IgnoreInvalidBasicConstraints and IgnoreWrongUsage cover the case where the SSO server
+                // certificate lacks the CA basic constraint or the certificate-signing key usage
+                // (e.g. in certificates issued by Let's Encrypt).
+                chain.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority
+                                                      | X509VerificationFlags.IgnoreInvalidBasicConstraints
+                                                      | X509VerificationFlags.IgnoreWrongUsage;
+                chain.ChainPolicy.CustomTrustStore.Add(ssoServerCert);
+
+                if (chain.Build(certificate) == false || chain.ChainElements.Count < 2)
+                {
+                    if (Logger.IsInfoEnabled)
+                    {
+                        Logger.Info($"Failed to validate certificate chain for SSO server '{ssoServerDef.Name}' with thumbprint '{ssoServerCert.Thumbprint}'");
+                    }
+
+                    foreach (var chainStatus in chain.ChainStatus)
+                    {
+                        if (Logger.IsDebugEnabled)
+                            Logger.Debug($"SSO chain status for '{ssoServerDef.Name}': {chainStatus.Status} - {chainStatus.StatusInformation}");
+
+                        log?.AppendLine($"Chain status: {chainStatus.Status} - {chainStatus.StatusInformation}");
+                    }
+                    continue;
+                }
+
+                // A successful Build() only proves the client cert chains to *some* issuer - because
+                // AllowUnknownCertificateAuthority suppresses the untrusted-root error, any certificate signed by a
+                // CA the host trusts builds a chain of length >= 2 even though it never went through this SSO server.
+                // Pin the immediate issuer to the registered SSO server's public key so only certificates actually
+                // signed by it are accepted.
+                var issuer = chain.ChainElements[1].Certificate;
+                if (CertificateUtils.PinningHashEquals(issuer.GetPublicKeyPinningHash(), ssoServerDef.PublicKeyPinningHash) == false)
+                {
+                    if (Logger.IsInfoEnabled)
+                        Logger.Info($"Client certificate '{certificate.Thumbprint}' chained successfully but its issuer does not match SSO server '{ssoServerDef.Name}' - skipping.");
+                    continue;
+                }
+
+                // Chain validated - this cert was signed by this SSO server cert. A client certificate is signed by
+                // exactly one SSO server, so there is no point in checking the rest.
+                signingSsoServer = ssoServerDef;
+                break;
+            }
+
+            if (signingSsoServer == null)
+                return;
+
+            if (embeddedSsoServerCert != null &&
+                CertificateUtils.PinningHashEquals(embeddedSsoServerCertPinningHash, signingSsoServer.PublicKeyPinningHash))
+                MaybeRegisterRenewedSsoServerCertificate(ctx, signingSsoServer, embeddedSsoServerCert, connectionInfo);
+
+            var ssoUserIdentity = payload.GetDisplayIdentity();
+            var ssoServerPinningHash = signingSsoServer.PublicKeyPinningHash;
+
+            if (string.IsNullOrEmpty(ssoServerPinningHash))
+                return;
+
+            // Single client-table lookup. NOTE: GetSsoClientCertificateByIdentity still does a full scan of the
+            // certificates table for SsoClient entries; a usage-typed secondary index is a possible future
+            // optimization if the number of SSO users grows large.
+            var ssoUserDef = ServerStore.Cluster.GetSsoClientCertificateByIdentity(ctx, payload);
+            if (ssoUserDef == null)
+            {
+                string remoteAddress = GetRemoteAddress(connectionInfo);
+                if (_auditLogger.IsAuditEnabled)
+                    _auditLogger.Audit(
+                        $"Connection from {remoteAddress} with certificate '{certificate.GetDisplayName()} ({certificate.Thumbprint})' " +
+                        $"signed by SSO server '{signingSsoServer.Name}'. SSO identity '{ssoUserIdentity}' is not registered in the cluster - rejecting.");
+
+                authenticationStatus.Status = AuthenticationStatus.UnfamiliarCertificate;
+                authenticationStatus.SsoUserIdentity = ssoUserIdentity;
+                return;
+            }
+
+            if (ssoUserDef.Disabled)
+            {
+                string remoteAddress = GetRemoteAddress(connectionInfo);
+                if (_auditLogger.IsAuditEnabled)
+                    _auditLogger.Audit(
+                        $"Connection from {remoteAddress} with certificate '{certificate.GetDisplayName()} ({certificate.Thumbprint})' " +
+                        $"signed by SSO server '{signingSsoServer.Name}'. SSO user '{ssoUserDef.Name}' ({ssoUserIdentity}) is disabled - rejecting.");
+
+                authenticationStatus.Status = AuthenticationStatus.UnfamiliarCertificate;
+                authenticationStatus.SsoUserIdentity = ssoUserIdentity;
+                return;
+            }
+
+            if (ssoUserDef.AllowAnySsoServer == false &&
+                (ssoUserDef.SsoServerPublicKeyPinningHashes == null ||
+                 ssoUserDef.SsoServerPublicKeyPinningHashes.Any(h => CertificateUtils.PinningHashEquals(h, ssoServerPinningHash)) == false))
+            {
+                string remoteAddress = GetRemoteAddress(connectionInfo);
+                if (_auditLogger.IsAuditEnabled)
+                    _auditLogger.Audit(
+                        $"Connection from {remoteAddress} with certificate '{certificate.GetDisplayName()} ({certificate.Thumbprint})' " +
+                        $"signed by SSO server '{signingSsoServer.Name}' (hash '{ssoServerPinningHash}'). " +
+                        $"SSO user '{ssoUserDef.Name}' ({ssoUserIdentity}) exists but is not bound to this SSO server - rejecting.");
+
+                authenticationStatus.Status = AuthenticationStatus.UnfamiliarCertificate;
+                authenticationStatus.SsoUserIdentity = ssoUserIdentity;
+                return;
+            }
+
+            authenticationStatus.IsSsoAuthenticated = true;
+            authenticationStatus.SsoUserIdentity = ssoUserIdentity;
+            authenticationStatus.SsoServerPublicKeyPinningHash = ssoServerPinningHash;
+
+            cert = ctx.ReadObject(ssoUserDef.ToJson(), "SSO/User/Certificate/Definition");
+
+            if (_auditLogger.IsAuditEnabled)
+                _auditLogger.Audit(
+                    $"Connection from {GetRemoteAddress(connectionInfo)} with SSO-authenticated certificate '{certificate.GetDisplayName()} ({certificate.Thumbprint})'. " +
+                    $"SSO user: '{ssoUserDef.Name}' ({ssoUserIdentity}), SSO server: '{signingSsoServer.Name}' ({signingSsoServer.Thumbprint}). " +
+                    $"Security Clearance: {ssoUserDef.SecurityClearance}, " +
+                    $"Permissions:{Environment.NewLine}{string.Join(Environment.NewLine, ssoUserDef.Permissions.Select(kvp => kvp.Key + ": " + kvp.Value.ToString()))}");
+        }
+
+        private static X509Certificate2 TryGetEmbeddedSsoServerCertificate(X509Certificate2 certificate)
+        {
+            var extension = certificate.Extensions[Raven.Client.Constants.Certificates.ServerCertExtensionOid];
+            if (extension == null)
+                return null;
+
+            // The SSO server writes the plain DER encoding of its certificate. We deliberately don't use
+            // CertificateUtils.ExtractServerCertificateFromExtension here - its fallback scans the (unauthenticated)
+            // extension bytes for a certificate at every offset.
+            try
+            {
+                return X509CertificateLoader.LoadCertificate(extension.RawData);
+            }
+            catch (CryptographicException)
+            {
+                return null;
+            }
+        }
+
+        // Registers a renewed SSO server certificate (same key, new issuance) presented embedded in a validated SSO
+        // client certificate, so the cluster keeps an up-to-date copy without the admin re-uploading it after every
+        // renewal. Mirrors MaybeAllowConnectionBasedOnPinningHash: the new certificate inherits the definition of the
+        // registered one and leftovers with the same pinning hash are discarded by the state machine.
+        private void MaybeRegisterRenewedSsoServerCertificate(TransactionOperationContext ctx, CertificateDefinition registeredSsoServer,
+            X509Certificate2 renewedSsoServerCert, object connectionInfo)
+        {
+            var thumbprint = renewedSsoServerCert.Thumbprint;
+
+            if (ServerStore.Cluster.GetCertificateByThumbprint(ctx, thumbprint) != null)
+                return;
+
+            // Only move forward - an older issuance (e.g. from an SSO server that wasn't restarted) must not be registered.
+            foreach (var ssoServerDef in ServerStore.Cluster.GetSsoServerCertificates(ctx))
+            {
+                if (CertificateUtils.PinningHashEquals(ssoServerDef.PublicKeyPinningHash, registeredSsoServer.PublicKeyPinningHash) &&
+                    ssoServerDef.NotAfter >= renewedSsoServerCert.NotAfter)
+                    return;
+            }
+
+            var newSsoServerDef = new CertificateDefinition
+            {
+                Name = registeredSsoServer.Name,
+                Certificate = Convert.ToBase64String(renewedSsoServerCert.Export(X509ContentType.Cert)),
+                Permissions = registeredSsoServer.Permissions,
+                SecurityClearance = registeredSsoServer.SecurityClearance,
+                Thumbprint = thumbprint,
+                PublicKeyPinningHash = registeredSsoServer.PublicKeyPinningHash,
+                NotAfter = renewedSsoServerCert.NotAfter,
+                NotBefore = renewedSsoServerCert.NotBefore,
+                Usage = CertificateUsage.SsoServer
+            };
+
+            if (_auditLogger.IsAuditEnabled)
+                _auditLogger.Audit(
+                    $"Connection from {GetRemoteAddress(connectionInfo)} with an SSO client certificate signed by renewed SSO server certificate '{renewedSsoServerCert.GetDisplayName()} ({thumbprint})' " +
+                    $"which is not registered in the cluster. Registering it based on the Public Key Pinning Hash of the registered SSO server certificate " +
+                    $"'{registeredSsoServer.Name}' ({registeredSsoServer.Thumbprint}).");
+
+            RegisterCertificateWithSamePinningHashInBackground(newSsoServerDef);
+        }
+
+        // Authentication can't wait for a cluster round trip, so the new certificate is registered in the background.
+        // The command also discards leftover certificates with the same pinning hash after the new certificate is saved.
+        private void RegisterCertificateWithSamePinningHashInBackground(CertificateDefinition certificateDefinition)
+        {
+            GC.KeepAlive(Task.Run(async () =>
+            {
+                try
+                {
+                    await ServerStore.SendToLeaderAsync(new PutCertificateWithSamePinningHashCommand(certificateDefinition.Thumbprint, certificateDefinition, RaftIdGenerator.NewId()));
+                }
+                catch (Exception e)
+                {
+                    if (Logger.IsInfoEnabled)
+                        Logger.Info($"Failed to run command '{nameof(PutCertificateWithSamePinningHashCommand)}' for certificate '{certificateDefinition.Thumbprint}'.", e);
+                }
+            }, ServerStore.ServerShutdown));
+        }
+
         private static string GetRemoteAddress(object connectionInfo)
         {
             string remoteAddress = null;
@@ -2151,7 +2440,7 @@ namespace Raven.Server
                     remoteAddress = tcp.Client.RemoteEndPoint.ToString();
                     break;
 
-                case HttpConnectionFeature http:
+                case IHttpConnectionFeature http:
                     remoteAddress = $"{http.RemoteIpAddress}:{http.RemotePort}";
                     break;
             }
@@ -2736,18 +3025,19 @@ namespace Raven.Server
             try
             {
                 using (var context = JsonOperationContext.ShortTermSingleUse())
-                await using (var errorWriter = new AsyncBlittableJsonTextWriter(context, tcpStream))
                 {
-                    context.Write(errorWriter, new DynamicJsonValue
+                    await using (var errorWriter = new AsyncBlittableJsonTextWriter(context, tcpStream))
                     {
-                        ["Type"] = "Error",
-                        ["Exception"] = e.ToString(),
-                        ["Message"] = e.Message
-                    });
+                        context.Write(errorWriter, new DynamicJsonValue
+                        {
+                            ["Type"] = "Error",
+                            ["Exception"] = e.ToString(),
+                            ["Message"] = e.Message
+                        });
+                    }
 
-                    await errorWriter.FlushAsync();
+                    await tcpStream.FlushAsync();
                 }
-
             }
             catch (Exception inner)
             {
@@ -3020,6 +3310,7 @@ namespace Raven.Server
             }
 
             var auth = AuthenticateConnectionCertificate(certificate, tcpClient);
+            var info = header.AuthorizeInfo;
 
             switch (auth.Status)
             {
@@ -3033,9 +3324,32 @@ namespace Raven.Server
 
                 case AuthenticationStatus.ClusterAdmin:
                 case AuthenticationStatus.Operator:
+                    if (info?.AuthorizeAs is PullReplication or PushReplication)
+                    {
+                        using (ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext ctx))
+                        using (ctx.OpenReadTransaction())
+                        {
+                            if (CheckPullReplicationMode(ctx, header, info, out msg) is false)
+                                return false;
+                        }
+                        // Create a ReplicationHubAccess that allows full access for admin
+                        header.ReplicationHubAccess = new DetailedReplicationHubAccess
+                        {
+                            Name = auth.Status.ToString(),
+                            Thumbprint = certificate.Thumbprint,
+                            Certificate = Convert.ToBase64String(certificate.Export(X509ContentType.Cert)),
+                            NotBefore = certificate.NotBefore,
+                            NotAfter = certificate.NotAfter,
+                            Subject = certificate.Subject,
+                            Issuer = certificate.Issuer,
+                            AllowedHubToSinkPaths = null, // null means all paths allowed
+                            AllowedSinkToHubPaths = null  // null means all paths allowed
+                        };
+                        return true;
+                    }
+
                     msg = "Admin can do it all";
                     return true;
-
                 case AuthenticationStatus.Allowed:
                     switch (header.Operation)
                     {
@@ -3052,7 +3366,15 @@ namespace Raven.Server
                                 msg = "Cannot allow access. Database name is empty.";
                                 return false;
                             }
-                            if (auth.CanAccess(header.DatabaseName, requireAdmin: false, requireWrite: header.Operation == TcpConnectionHeaderMessage.OperationTypes.Replication))
+
+                            bool isReplication = header.Operation == TcpConnectionHeaderMessage.OperationTypes.Replication;
+
+                            if (isReplication && info?.AuthorizeAs is PullReplication or PushReplication)
+                            {
+                                return CanProceedOnReplication(header, certificate, remoteAddress: tcpClient.Client.RemoteEndPoint?.ToString(), out msg);
+                            }
+
+                            if (auth.CanAccess(header.DatabaseName, requireAdmin: false, requireWrite: isReplication))
                                 return true;
                             msg = $"The certificate {certificate.FriendlyName} does not allow access to {header.DatabaseName}";
                             return false;
@@ -3067,50 +3389,76 @@ namespace Raven.Server
                     return false;
 
                 case AuthenticationStatus.UnfamiliarCertificate:
-                    var info = header.AuthorizeInfo;
-                    switch (info?.AuthorizeAs)
+                    if (info?.AuthorizeAs is PullReplication or PushReplication)
                     {
-                        case TcpConnectionHeaderMessage.AuthorizationInfo.AuthorizeMethod.PullReplication:
-                        case TcpConnectionHeaderMessage.AuthorizationInfo.AuthorizeMethod.PushReplication:
-                            using (ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext ctx))
-                            using (ctx.OpenReadTransaction())
-                            {
-                                if (ServerStore.Cluster.TryReadPullReplicationDefinition(header.DatabaseName, info.AuthorizationFor, ctx, out var pullReplication))
-                                {
-                                    var expectedMode = info.AuthorizeAs switch
-                                    {
-                                        TcpConnectionHeaderMessage.AuthorizationInfo.AuthorizeMethod.PullReplication => PullReplicationMode.HubToSink,
-                                        TcpConnectionHeaderMessage.AuthorizationInfo.AuthorizeMethod.PushReplication => PullReplicationMode.SinkToHub,
-                                        _ => PullReplicationMode.None
-                                    };
-
-                                    if ((pullReplication.Mode & expectedMode) != expectedMode || expectedMode == PullReplicationMode.None)
-                                    {
-                                        msg = "The expected replication mode does not match the replication mode on the replication hub";
-                                        return false;
-                                    }
-
-                                    if (ServerStore.Cluster.IsReplicationCertificate(ctx, header.DatabaseName, info.AuthorizationFor, certificate, out header.ReplicationHubAccess))
-                                        return true;
-
-                                    if (ServerStore.Cluster.IsReplicationCertificateByPublicKeyPinningHash(ctx, header.DatabaseName, info.AuthorizationFor, certificate, configuration.Security, out header.ReplicationHubAccess))
-                                    {
-                                        RegisterNewReplicationCertificateWithSamePublicKeyPinningHash(tcpClient.Client.RemoteEndPoint.ToString(), header.DatabaseName, info.AuthorizationFor, header.ReplicationHubAccess, certificate);
-
-                                        return true;
-                                    }
-                                }
-
-                                msg = $"The certificate {certificate.FriendlyName} does not allow access to {header.DatabaseName} for {info.AuthorizationFor} ({info.AuthorizeAs})";
-                                return false;
-                            }
-                        default:
-                            throw new ArgumentOutOfRangeException("AuthorizeAs", "Unknown value for AuthorizeAs: " + info?.AuthorizeAs);
+                        return CanProceedOnReplication(header, certificate, remoteAddress: tcpClient.Client.RemoteEndPoint?.ToString(), out msg);
                     }
+
+                    throw new ArgumentOutOfRangeException(nameof(info.AuthorizeAs), "Unknown value for AuthorizeAs: " + info?.AuthorizeAs);
                 default:
                     msg = "Cannot allow access to a certificate with status: " + auth.Status;
                     return false;
             }
+        }
+
+        /// <summary>
+        /// Checks the <see cref="TcpConnectionHeaderMessage.AuthorizeInfo"/> and checks if it can proceed as replication.
+        /// </summary>
+        private bool CanProceedOnReplication(
+            TcpConnectionHeaderMessage header,
+            X509Certificate2 certificate,
+            string remoteAddress,
+            out string msg)
+        {
+            msg = null;
+            var info = header.AuthorizeInfo;
+
+            Debug.Assert(info?.AuthorizeAs is PullReplication or PushReplication, "It should be called only for replication.");
+            
+            using (ServerStore.Engine.ContextPool.AllocateOperationContext(out ClusterOperationContext ctx))
+            using (ctx.OpenReadTransaction())
+            {
+                if (CheckPullReplicationMode(ctx, header, info, out msg) is false) 
+                    return false;
+
+                // For non-admin certificates, check if the certificate is registered
+                if (ServerStore.Cluster.IsReplicationCertificate(ctx, header.DatabaseName, info.AuthorizationFor, certificate, out header.ReplicationHubAccess))
+                    return true;
+
+                if (ServerStore.Cluster.IsReplicationCertificateByPublicKeyPinningHash(ctx, header.DatabaseName, info.AuthorizationFor, certificate, ServerStore.Configuration.Security, out header.ReplicationHubAccess))
+                {
+                    RegisterNewReplicationCertificateWithSamePublicKeyPinningHash(remoteAddress, header.DatabaseName, info.AuthorizationFor, header.ReplicationHubAccess, certificate);
+                    return true;
+                }
+
+                msg = $"The certificate {certificate.FriendlyName} does not allow access to {header.DatabaseName} for {info.AuthorizationFor} ({info.AuthorizeAs})";
+                return false;
+            }
+        }
+
+        private bool CheckPullReplicationMode(ClusterOperationContext ctx, TcpConnectionHeaderMessage header, TcpConnectionHeaderMessage.AuthorizationInfo info, out string msg)
+        {
+            if (ServerStore.Cluster.TryReadPullReplicationDefinition(header.DatabaseName, info.AuthorizationFor, ctx, out var pullReplication) == false)
+            {
+                msg = $"The pull replication hub '{info.AuthorizationFor}' does not exist in database '{header.DatabaseName}'";
+                return false;
+            }
+
+            var expectedMode = info.AuthorizeAs switch
+            {
+                PullReplication => PullReplicationMode.HubToSink,
+                PushReplication => PullReplicationMode.SinkToHub,
+                _ => PullReplicationMode.None
+            };
+
+            if ((pullReplication.Mode & expectedMode) != expectedMode || expectedMode == PullReplicationMode.None)
+            {
+                msg = "The expected replication mode does not match the replication mode on the replication hub";
+                return false;
+            }
+
+            msg = null;
+            return true;
         }
 
         private void RegisterNewReplicationCertificateWithSamePublicKeyPinningHash(
@@ -3218,7 +3566,7 @@ namespace Raven.Server
                 ea.Execute(() => AdminConsolePipe?.Dispose());
                 ea.Execute(() => LogStreamPipe?.Dispose());
                 ea.Execute(() => _redirectingWebHost?.Dispose());
-                ea.Execute(() => _webHost?.Dispose());
+                ea.Execute(() => DisposeWebHost());
                 ea.Execute(() => _tcpContextPool?.Dispose());
                 if (_tcpListenerStatus != null)
                 {
@@ -3255,6 +3603,36 @@ namespace Raven.Server
 
                 ea.ThrowIfNeeded();
             }
+        }
+
+        private void DisposeWebHost()
+        {
+            try
+            {
+                _webHost?.Dispose();
+            }
+            catch (Exception e) when (IsExpectedShutdownException(e))
+            {
+                // During shutdown, active HTTP connections may throw I/O exceptions
+                // (broken pipe, connection reset) as they are torn down. This is expected.
+                if (_tcpLogger.IsInfoEnabled)
+                    _tcpLogger.Info("Ignoring expected I/O error during web host shutdown", e);
+            }
+        }
+
+        private static bool IsExpectedShutdownException(Exception e)
+        {
+            if (e is IOException or SocketException)
+                return true;
+
+            if (e is AggregateException ae)
+            {
+                AggregateException flattened = ae.Flatten();
+                return flattened.InnerExceptions.Count > 0 &&
+                       flattened.InnerExceptions.All(ie => ie is IOException or SocketException);
+            }
+
+            return false;
         }
 
         private void CloseTcpListeners(List<TcpListener> listeners)

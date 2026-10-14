@@ -8,7 +8,9 @@ using Raven.Server.Documents;
 using Raven.Server.Integrations.PostgreSQL.Exceptions;
 using Raven.Server.Integrations.PostgreSQL.Messages;
 using Raven.Server.Integrations.PostgreSQL.PowerBI;
+using Raven.Server.Integrations.PostgreSQL.Translation;
 using Raven.Server.Integrations.PostgreSQL.Types;
+using Raven.Server.Integrations.PostgreSQL.VirtualCatalog;
 using Raven.Server.Logging;
 using Sparrow.Logging;
 using Sparrow.Server.Logging;
@@ -25,7 +27,6 @@ namespace Raven.Server.Integrations.PostgreSQL
         public Dictionary<string, object> Parameters;
         protected readonly Dictionary<string, PgColumn> Columns;
         private short[] _resultColumnFormatCodes;
-        public bool IsNamedStatement { get; set; } = false;
 
         protected PgQuery(string queryString, int[] parametersDataTypes)
         {
@@ -37,12 +38,15 @@ namespace Raven.Server.Integrations.PostgreSQL
             _resultColumnFormatCodes = Array.Empty<short>();
         }
 
-        public static PgQuery CreateInstance(string queryText, int[] parametersDataTypes, DocumentDatabase documentDatabase, PgSession session)
+        public static PgQuery CreateInstance(string queryText, int[] parametersDataTypes, DocumentDatabase documentDatabase, PgSession session, string username = null)
         {
             queryText = queryText.Trim();
 
             try
             {
+                if (ProtocolCommandQuery.TryParse(queryText, parametersDataTypes, session, out var protocolCommand))
+                    return protocolCommand;
+
                 if (RqlQuery.TryParse(queryText, parametersDataTypes, documentDatabase, out var rqlQuery))
                     return rqlQuery;
 
@@ -50,18 +54,39 @@ namespace Raven.Server.Integrations.PostgreSQL
                 {
                     if (documentDatabase.ServerStore.LicenseManager.CanUsePowerBi(withNotification: true, out var licenseLimitException) == false)
                         throw licenseLimitException;
-
                     return powerBiQuery;
                 }
 
-                if (HardcodedQuery.TryParse(queryText, parametersDataTypes, session, out var hardcodedQuery))
-                    return hardcodedQuery;
+                if (PgVirtualInterpreter.TryExecute(queryText, new VirtualQueryContext { Database = documentDatabase, Username = username }, out var virtualTable))
+                    return new VirtualInterpreterQuery(queryText, parametersDataTypes, virtualTable);
+
+                if (PgSqlToRqlTranslator.TryParseScalarCount(queryText, documentDatabase, out var countRql, out var countColumns))
+                    return new PgScalarCountQuery(countRql, parametersDataTypes, documentDatabase, countColumns);
+
+                if (PgSqlToRqlTranslator.TryParse(queryText, parametersDataTypes, documentDatabase, out var rql, out var hasExplicitProjection))
+                {
+                    return hasExplicitProjection
+                        ? new PgSqlTranslatedRqlQuery(rql, parametersDataTypes, documentDatabase)
+                        : new RqlQuery(rql, parametersDataTypes, documentDatabase);
+                }
+
+                // Targeted FeatureNotSupported errors for known unsupported shapes (JOIN,
+                // scalar aggregate, etc.) before the generic StatementTooComplex fallback —
+                // gives clients actionable workaround hints instead of an SQL dump.
+                if (UnhandledQueryDiagnoser.TryDiagnose(queryText, out var diagnosis))
+                {
+                    throw new PgErrorException(
+                        PgErrorCodes.FeatureNotSupported,
+                        $"{diagnosis}{Environment.NewLine}{Environment.NewLine}Query:{Environment.NewLine}{queryText}");
+                }
 
                 throw new PgErrorException(
                     PgErrorCodes.StatementTooComplex,
-                    "Unhandled query (Are you using ; in your query? " +
-                    $"That is likely causing the postgres client to split the query and results in partial queries): {Environment.NewLine}" +
-                    $"{queryText}");
+                    $"Unhandled query:{Environment.NewLine}{queryText}");
+            }
+            catch (InsufficientExecutionStackException)
+            {
+                throw new PgErrorException(PgErrorCodes.StatementTooComplex, $"Query is too deeply nested to evaluate:{Environment.NewLine}{queryText}");
             }
             catch (Exception e)
             {
@@ -84,7 +109,7 @@ namespace Raven.Server.Integrations.PostgreSQL
             };
         }
 
-        public abstract Task<ICollection<PgColumn>> Init(bool allowMultipleStatements = false);
+        public abstract Task<ICollection<PgColumn>> Init();
 
         public abstract Task Execute(MessageBuilder builder, PipeWriter writer, CancellationToken token);
 
@@ -93,6 +118,9 @@ namespace Raven.Server.Integrations.PostgreSQL
         public virtual void Bind(ICollection<byte[]> parameters, short[] parameterFormatCodes, short[] resultColumnFormatCodes)
         {
             _resultColumnFormatCodes = resultColumnFormatCodes;
+
+            // A cached prepared statement is re-bound on the same instance, so reset before re-populating.
+            Parameters.Clear();
 
             PgFormat? defaultParamDataFormat = parameterFormatCodes.Length switch
             {

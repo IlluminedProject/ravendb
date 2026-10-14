@@ -12,12 +12,18 @@ import {
     ConnectionFormData,
     SnowflakeConnection,
     AmazonSqsConnection,
+    AzureServiceBusConnection,
     AiConnection,
 } from "../connectionStringsTypes";
 import assertUnreachable from "components/utils/assertUnreachable";
 import ApiKeyAuthentication = Raven.Client.Documents.Operations.ETL.ElasticSearch.ApiKeyAuthentication;
+import AiConnectionStringDto = Raven.Client.Documents.Operations.AI.AiConnectionString;
+import RavenConnectionStringDto = Raven.Client.Documents.Operations.ETL.RavenConnectionString;
+import SqlConnectionStringDto = Raven.Client.Documents.Operations.ETL.SQL.SqlConnectionString;
+import SnowflakeConnectionStringDto = Raven.Client.Documents.Operations.ETL.Snowflake.SnowflakeConnectionString;
+import OlapConnectionStringDto = Raven.Client.Documents.Operations.ETL.OLAP.OlapConnectionString;
 
-export function mapRavenConnectionStringToDto(connection: RavenConnection): ConnectionStringDto {
+export function mapRavenConnectionStringToDto(connection: RavenConnection): RavenConnectionStringDto {
     return {
         Type: "Raven",
         Name: connection.name,
@@ -26,7 +32,7 @@ export function mapRavenConnectionStringToDto(connection: RavenConnection): Conn
     };
 }
 
-export function mapSqlConnectionStringToDto(connection: SqlConnection): ConnectionStringDto {
+export function mapSqlConnectionStringToDto(connection: SqlConnection): SqlConnectionStringDto {
     return {
         Type: "Sql",
         Name: connection.name,
@@ -35,7 +41,7 @@ export function mapSqlConnectionStringToDto(connection: SqlConnection): Connecti
     };
 }
 
-export function mapSnowflakeConnectionStringToDto(connection: SnowflakeConnection): ConnectionStringDto {
+export function mapSnowflakeConnectionStringToDto(connection: SnowflakeConnection): SnowflakeConnectionStringDto {
     return {
         Type: "Snowflake",
         Name: connection.name,
@@ -43,7 +49,7 @@ export function mapSnowflakeConnectionStringToDto(connection: SnowflakeConnectio
     };
 }
 
-export function mapOlapConnectionStringToDto(connection: OlapConnection): ConnectionStringDto {
+export function mapOlapConnectionStringToDto(connection: OlapConnection): OlapConnectionStringDto {
     return {
         Type: "Olap",
         Name: connection.name,
@@ -117,7 +123,7 @@ export function mapRabbitMqStringToDto(connection: RabbitMqConnection): Connecti
 }
 
 export function mapAzureQueueStorageConnectionStringSettingsToDto(
-    connection: Omit<AzureQueueStorageConnection, "type" | "usedByTasks">
+    connection: Omit<AzureQueueStorageConnection, "type" | "usedBy">
 ): Raven.Client.Documents.Operations.ETL.Queue.AzureQueueStorageConnectionSettings {
     switch (connection.authType) {
         case "connectionString": {
@@ -159,7 +165,7 @@ export function mapAzureQueueStorageConnectionStringSettingsToDto(
 }
 
 export function mapAmazonSqsConnectionStringSettingsToDto(
-    connection: Omit<AmazonSqsConnection, "type" | "usedByTasks">
+    connection: Omit<AmazonSqsConnection, "type" | "usedBy">
 ): Raven.Client.Documents.Operations.ETL.Queue.AmazonSqsConnectionSettings {
     switch (connection.authType) {
         case "basic": {
@@ -203,7 +209,57 @@ export function mapAmazonSqsConnectionStringToDto(connection: AmazonSqsConnectio
     };
 }
 
-export function mapAiConnectionStringToDto(connection: AiConnection): ConnectionStringDto {
+export function mapAzureServiceBusConnectionStringSettingsToDto(
+    connection: Omit<AzureServiceBusConnection, "type" | "usedBy">
+): Raven.Client.Documents.Operations.ETL.Queue.AzureServiceBusConnectionSettings {
+    switch (connection.authType) {
+        case "connectionString": {
+            const connectionSettings = connection.settings[connection.authType];
+            const connectionStringWithoutNewLines = connectionSettings.connectionStringValue.replace(/\n/g, "");
+            return {
+                ConnectionString: connectionStringWithoutNewLines,
+                EntraId: null,
+                Passwordless: null,
+            };
+        }
+        case "entraId": {
+            const connectionSettings = connection.settings[connection.authType];
+            return {
+                ConnectionString: null,
+                EntraId: {
+                    Namespace: connectionSettings.namespace,
+                    TenantId: connectionSettings.tenantId,
+                    ClientId: connectionSettings.clientId,
+                    ClientSecret: connectionSettings.clientSecret,
+                },
+                Passwordless: null,
+            };
+        }
+        case "passwordless": {
+            const connectionSettings = connection.settings[connection.authType];
+            return {
+                ConnectionString: null,
+                EntraId: null,
+                Passwordless: {
+                    Namespace: connectionSettings.namespace,
+                },
+            };
+        }
+        default:
+            return assertUnreachable(connection.authType);
+    }
+}
+
+export function mapAzureServiceBusConnectionStringToDto(connection: AzureServiceBusConnection): ConnectionStringDto {
+    return {
+        Type: "Queue",
+        BrokerType: "AzureServiceBus",
+        Name: connection.name,
+        AzureServiceBusConnectionSettings: mapAzureServiceBusConnectionStringSettingsToDto(connection),
+    };
+}
+
+export function mapAiConnectionStringToDto(connection: AiConnection): AiConnectionStringDto {
     return {
         Type: "Ai",
         Name: connection.name,
@@ -218,6 +274,7 @@ export function mapAiConnectionStringToDto(connection: AiConnection): Connection
                       DeploymentName: connection.azureOpenAiSettings.deploymentName,
                       Dimensions: mapDimensionsToDto(connection),
                       EmbeddingsMaxConcurrentBatches: mapEmbeddingsMaxConcurrentBatchesToDto(connection),
+                      EnablePromptCache: connection.azureOpenAiSettings.enablePromptCache,
                       Temperature: mapTemperatureToDto(connection),
                   }
                 : null,
@@ -230,6 +287,7 @@ export function mapAiConnectionStringToDto(connection: AiConnection): Connection
                       Dimensions: mapDimensionsToDto(connection),
                       Endpoint: connection.googleSettings.endpoint,
                       EmbeddingsMaxConcurrentBatches: mapEmbeddingsMaxConcurrentBatchesToDto(connection),
+                      EnablePromptCache: connection.googleSettings.enablePromptCache,
                   }
                 : null,
         HuggingFaceSettings:
@@ -267,8 +325,11 @@ export function mapAiConnectionStringToDto(connection: AiConnection): Connection
                       Model: connection.openAiSettings.model,
                       OrganizationId: connection.openAiSettings.organizationId,
                       ProjectId: connection.openAiSettings.projectId,
+                      ReasoningEffort:
+                          connection.modelType === "Chat" ? connection.openAiSettings.reasoningEffort : null,
                       Dimensions: mapDimensionsToDto(connection),
                       EmbeddingsMaxConcurrentBatches: mapEmbeddingsMaxConcurrentBatchesToDto(connection),
+                      EnablePromptCache: connection.openAiSettings.enablePromptCache,
                       Temperature: mapTemperatureToDto(connection),
                   }
                 : null,
@@ -360,6 +421,8 @@ export function mapConnectionStringToDto(connection: Connection): ConnectionStri
             return mapAzureQueueStorageConnectionStringToDto(connection);
         case "AmazonSqs":
             return mapAmazonSqsConnectionStringToDto(connection);
+        case "AzureServiceBus":
+            return mapAzureServiceBusConnectionStringToDto(connection);
         case "Ai":
             return mapAiConnectionStringToDto(connection);
         default:

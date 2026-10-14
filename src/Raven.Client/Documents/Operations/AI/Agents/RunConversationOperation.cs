@@ -2,11 +2,13 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using Raven.Client.Documents.AI;
 using Raven.Client.Documents.Commands.Batches;
 using Raven.Client.Documents.Conventions;
+using Raven.Client.Exceptions;
 using Raven.Client.Http;
 using Raven.Client.Json;
 using Raven.Client.Util;
@@ -33,6 +35,9 @@ public class RunConversationOperation<TSchema> : IMaintenanceOperation<Conversat
     private readonly string _streamPropertyPath;
     private readonly Func<string, Task> _streamedChunksCallback;
     private readonly List<ICommandData> _attachmentsCommands;
+    private readonly bool? _debug;
+    private readonly bool _cancelPendingActionTools;
+    private readonly AiOutputOptions _outputOptions;
 
     /// <summary>
     /// Initializes a new conversation step for the specified agent and conversation.
@@ -145,10 +150,31 @@ public class RunConversationOperation<TSchema> : IMaintenanceOperation<Conversat
         string changeVector,
         List<ICommandData> attachmentsCommands,
         string streamPropertyPath,
-        Func<string, Task> streamedChunksCallback)
+        Func<string, Task> streamedChunksCallback,
+        AiOutputOptions outputOptions = null)
         : this(agentId, conversationId, promptParts, actionResponses, artificialActions, options, changeVector, streamPropertyPath, streamedChunksCallback)
     {
         _attachmentsCommands = attachmentsCommands;
+        _outputOptions = outputOptions;
+    }
+
+    internal RunConversationOperation(string agentId,
+        string conversationId,
+        IEnumerable<ContentPart> promptParts,
+        List<AiAgentActionResponse> actionResponses,
+        List<AiAgentArtificialActionResponse> artificialActions,
+        AiConversationCreationOptions options,
+        string changeVector,
+        List<ICommandData> attachmentsCommands,
+        string streamPropertyPath,
+        Func<string, Task> streamedChunksCallback,
+        AiOutputOptions outputOptions,
+        bool? debug,
+        bool cancelPendingActionTools)
+        : this(agentId, conversationId, promptParts, actionResponses, artificialActions, options, changeVector, attachmentsCommands, streamPropertyPath, streamedChunksCallback, outputOptions)
+    {
+        _debug = debug;
+        _cancelPendingActionTools = cancelPendingActionTools;
     }
 
     [Obsolete("Use the constructor that accepts a List or an Array instead. This is for backward compatibility.", error: false)]
@@ -233,13 +259,19 @@ public class RunConversationOperation<TSchema> : IMaintenanceOperation<Conversat
             if (_parent._streamPropertyPath is not null)
                 url += $"&streaming=true&streamPropertyPath={Uri.EscapeDataString(_parent._streamPropertyPath)}";
 
-            var body = new ConversionRequestBody
+            if (_parent._debug.HasValue)
+                url += $"&debug={_parent._debug.Value}";
+
+            url += $"&cancelPendingActionTools={_parent._cancelPendingActionTools}";
+
+            var body = new ConversionRequestBody    
             {
                 ActionResponses = _parent._actionResponses,
                 ArtificialActions = _parent._artificialActions,
                 UserPrompt = _parent._promptParts,
                 CreationOptions = _parent._options,
-                AttachmentCommands = _parent._attachmentsCommands
+                AttachmentCommands = _parent._attachmentsCommands,
+                OutputOptions = _parent._outputOptions
             };
 
             var request = new HttpRequestMessage
@@ -247,7 +279,7 @@ public class RunConversationOperation<TSchema> : IMaintenanceOperation<Conversat
                 Method = HttpMethod.Post,
                 Content = new BlittableJsonContent(async stream =>
                 {
-                    await ctx.WriteAsync(stream, ctx.ReadObject(body.ToJson(), "conversation-params")).ConfigureAwait(false);
+                    await ctx.WriteAsync(stream, ctx.ReadObject(body.ToJson(_conventions, ctx), "conversation-params")).ConfigureAwait(false);
                 }, _conventions)
             };
 
@@ -295,13 +327,23 @@ public class RunConversationOperation<TSchema> : IMaintenanceOperation<Conversat
             using var streamReader = new StreamReader(stream);
             while (true)
             {
+#if NETSTANDARD2_0 || NETSTANDARD2_1
                 var line = await streamReader.ReadLineAsync().ConfigureAwait(false);
+                CancellationToken.ThrowIfCancellationRequested();
+#else
+                var line = await streamReader.ReadLineAsync(CancellationToken).ConfigureAwait(false);
+#endif
                 if (line is null)
                     break;
 
                 if (line.StartsWith("{"))
                 {
                     using var final = context.Sync.ReadForMemory(line, "final/result");
+                    // An exception thrown after streaming already started (HTTP 200) is written into the stream as the
+                    // standard error payload - surface it (e.g. RefusedToAnswerException) instead of parsing it as the result.
+                    if (final.TryGet(nameof(ExceptionDispatcher.ExceptionSchema.Type), out string exceptionType) && string.IsNullOrEmpty(exceptionType) == false)
+                        throw ExceptionDispatcher.Get(final, response.StatusCode);
+
                     SetResponse(context, final, fromCache: false);
                     break;
                 }

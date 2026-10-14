@@ -476,6 +476,14 @@ namespace Raven.Server.Documents.PeriodicBackup.Restore
                 }
             }
 
+            if (databaseRecord.GenAis != null)
+            {
+                foreach (var task in databaseRecord.GenAis)
+                {
+                    task.Disabled = true;
+                }
+            }
+
             if (databaseRecord.PeriodicBackups != null)
             {
                 foreach (var task in databaseRecord.PeriodicBackups)
@@ -503,6 +511,14 @@ namespace Raven.Server.Documents.PeriodicBackup.Restore
             if (databaseRecord.QueueSinks != null)
             {
                 foreach (var task in databaseRecord.QueueSinks)
+                {
+                    task.Disabled = true;
+                }
+            }
+
+            if (databaseRecord.CdcSinks != null)
+            {
+                foreach (var task in databaseRecord.CdcSinks)
                 {
                     task.Disabled = true;
                 }
@@ -619,6 +635,7 @@ namespace Raven.Server.Documents.PeriodicBackup.Restore
                     databaseRecord.RevisionsForConflicts = smugglerDatabaseRecord.RevisionsForConflicts;
                     databaseRecord.DataArchival = smugglerDatabaseRecord.DataArchival;
                     databaseRecord.QueueSinks = smugglerDatabaseRecord.QueueSinks;
+                    databaseRecord.CdcSinks = smugglerDatabaseRecord.CdcSinks;
                     databaseRecord.SupportedFeatures = smugglerDatabaseRecord.SupportedFeatures;
                     databaseRecord.SnowflakeEtls = smugglerDatabaseRecord.SnowflakeEtls;
                     databaseRecord.SnowflakeConnectionStrings = smugglerDatabaseRecord.SnowflakeConnectionStrings;

@@ -2,7 +2,6 @@ import { databaseSelectors } from "components/common/shell/databaseSliceSelector
 import { useAppUrls } from "components/hooks/useAppUrls";
 import { useDirtyFlag } from "components/hooks/useDirtyFlag";
 import { useServices } from "components/hooks/useServices";
-import { connectionStringsActions } from "components/pages/database/settings/connectionStrings/store/connectionStringsSlice";
 import { useAppDispatch, useAppSelector } from "components/store";
 import { tryHandleSubmit } from "components/utils/common";
 import { useEffect } from "react";
@@ -18,6 +17,7 @@ import {
     testAiAgentYupResolver,
 } from "../utils/editAiAgentValidation";
 import router from "plugins/router";
+import { hasRelevantDirtyFields } from "components/common/Form";
 
 interface QueryParams {
     id: string;
@@ -35,7 +35,6 @@ export default function useEditAiAgent(queryParams: QueryParams) {
 
     // Set connection strings view context on mount and reset store on unmount
     useEffect(() => {
-        dispatch(connectionStringsActions.viewContextSet("aiTask"));
         dispatch(editAiAgentActions.getAllIdentifiers(databaseName));
 
         return () => {
@@ -92,7 +91,8 @@ export default function useEditAiAgent(queryParams: QueryParams) {
         );
     };
 
-    const { setIsDirty } = useDirtyFlag(editForm.formState.isDirty);
+    const hasRelevantDirty = hasRelevantDirtyFields(editForm.formState.dirtyFields, ["isEditing"]);
+    const { setIsDirty } = useDirtyFlag(hasRelevantDirty);
 
     const reloadEditForm = async () => {
         const result = await asyncGetEditDefaultValues.execute();

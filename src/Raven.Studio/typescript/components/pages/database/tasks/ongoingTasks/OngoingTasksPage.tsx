@@ -1,13 +1,16 @@
-﻿import React, { useCallback, useEffect, useReducer, useState } from "react";
+﻿import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useServices } from "hooks/useServices";
-import { OngoingTasksState, ongoingTasksReducer, ongoingTasksReducerInitializer } from "./partials/OngoingTasksReducer";
+import { ongoingTasksReducer, ongoingTasksReducerInitializer, OngoingTasksState } from "./partials/OngoingTasksReducer";
 import { ExternalReplicationPanel } from "./panels/ExternalReplicationPanel";
 import {
-    OngoingTaskEmbeddingsGenerationInfo,
     OngoingTaskAmazonSqsEtlInfo,
     OngoingTaskAzureQueueStorageEtlInfo,
+    OngoingTaskAzureServiceBusSinkInfo,
+    OngoingTaskCdcSinkInfo,
     OngoingTaskElasticSearchEtlInfo,
+    OngoingTaskEmbeddingsGenerationInfo,
     OngoingTaskExternalReplicationInfo,
+    OngoingTaskGenAiInfo,
     OngoingTaskInfo,
     OngoingTaskKafkaEtlInfo,
     OngoingTaskKafkaSinkInfo,
@@ -21,7 +24,6 @@ import {
     OngoingTaskSharedInfo,
     OngoingTaskSnowflakeEtlInfo,
     OngoingTaskSqlEtlInfo,
-    OngoingTaskGenAiInfo,
 } from "components/models/tasks";
 import { RavenEtlPanel } from "./panels/RavenEtlPanel";
 import { SqlEtlPanel } from "./panels/SqlEtlPanel";
@@ -38,10 +40,7 @@ import {
     ReplicationProgressProvider,
 } from "./partials/OngoingTaskProgressProviders";
 import { BaseOngoingTaskPanelProps, taskKey, useOngoingTasksOperations } from "../shared/shared";
-import EtlTaskProgress = Raven.Server.Documents.ETL.Stats.EtlTaskProgress;
 import "./OngoingTaskPage.scss";
-import etlScriptDefinitionCache from "models/database/stats/etlScriptDefinitionCache";
-import TaskUtils from "../../../../utils/TaskUtils";
 import { KafkaEtlPanel } from "./panels/KafkaEtlPanel";
 import { RabbitMqEtlPanel } from "./panels/RabbitMqEtlPanel";
 import useInterval from "hooks/useInterval";
@@ -53,6 +52,8 @@ import { OngoingTasksFilterCriteria } from "./partials/OngoingTasksFilter";
 import OngoingTaskOperationConfirm from "../shared/OngoingTaskOperationConfirm";
 import { KafkaSinkPanel } from "components/pages/database/tasks/ongoingTasks/panels/KafkaSinkPanel";
 import { RabbitMqSinkPanel } from "components/pages/database/tasks/ongoingTasks/panels/RabbitMqSinkPanel";
+import { AzureServiceBusSinkPanel } from "components/pages/database/tasks/ongoingTasks/panels/AzureServiceBusSinkPanel";
+import { CdcSinkPanel } from "components/pages/database/tasks/ongoingTasks/panels/CdcSinkPanel";
 import { CounterBadge } from "components/common/CounterBadge";
 import { getLicenseLimitReachStatus } from "components/utils/licenseLimitsUtils";
 import { useAppSelector } from "components/store";
@@ -63,22 +64,52 @@ import { AzureQueueStorageEtlPanel } from "components/pages/database/tasks/ongoi
 import { databaseSelectors } from "components/common/shell/databaseSliceSelectors";
 import { compareSets } from "common/typeUtils";
 import RichAlert from "components/common/RichAlert";
-import ReplicationTaskProgress = Raven.Server.Documents.Replication.Stats.ReplicationTaskProgress;
-import InternalReplicationTaskProgress = Raven.Server.Documents.Replication.Stats.InternalReplicationTaskProgress;
 import { OngoingTasksHeader } from "components/pages/database/tasks/ongoingTasks/partials/OngoingTasksHeader";
 import { InternalReplicationPanel } from "./panels/InternalReplicationPanel";
+import { LoadingView } from "components/common/LoadingView";
+import { LoadError } from "components/common/LoadError";
 import DatabaseUtils from "components/utils/DatabaseUtils";
-import recentError from "common/notifications/models/recentError";
+import { databaseLocationComparator, getRequestErrorMessage } from "components/utils/common";
 import { SnowflakeEtlPanel } from "components/pages/database/tasks/ongoingTasks/panels/SnowflakeEtlPanel";
 import { AmazonSqsEtlPanel } from "components/pages/database/tasks/ongoingTasks/panels/AmazonSqsEtlPanel";
 import { EmbeddingsGenerationPanel } from "components/pages/database/tasks/ongoingTasks/panels/EmbeddingsGenerationPanel";
 import { GenAiPanel } from "./panels/GenAiPanel";
+import { useDatabaseWideAsync } from "components/hooks/useDatabaseWideAsync";
+import genUtils from "common/generalUtils";
+import { TaskErrorsWithLocation } from "components/pages/database/tasks/tasksErrors/utils/tasksErrorsUtils";
+import EtlTaskProgress = Raven.Server.Documents.ETL.Stats.EtlTaskProgress;
+import ReplicationTaskProgress = Raven.Server.Documents.Replication.Stats.ReplicationTaskProgress;
+import InternalReplicationTaskProgress = Raven.Server.Documents.Replication.Stats.InternalReplicationTaskProgress;
+import EtlTaskStats = Raven.Server.Documents.ETL.Stats.EtlTaskStats;
 
 interface OngoingTasksPageProps {
     isAiOnly?: boolean;
 }
 
-export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
+type EtlOrAiOngoingTaskType = Extract<
+    Raven.Client.Documents.Operations.OngoingTasks.OngoingTaskType,
+    | "RavenEtl"
+    | "SqlEtl"
+    | "OlapEtl"
+    | "ElasticSearchEtl"
+    | "QueueEtl"
+    | "SnowflakeEtl"
+    | "EmbeddingsGeneration"
+    | "GenAi"
+>;
+
+const etlAndAiTaskTypes = genUtils.exhaustiveStringTuple<EtlOrAiOngoingTaskType>()(
+    "RavenEtl",
+    "SqlEtl",
+    "OlapEtl",
+    "ElasticSearchEtl",
+    "QueueEtl",
+    "SnowflakeEtl",
+    "EmbeddingsGeneration",
+    "GenAi"
+);
+
+export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps = {}) {
     const db = useAppSelector(databaseSelectors.activeDatabase);
 
     const { tasksService } = useServices();
@@ -88,46 +119,74 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
         useBoolean(false);
     const { value: replicationProgressEnabled, setTrue: startTrackingReplicationProgress } = useBoolean(false);
     const { value: etlProgressEnabled, setTrue: startTrackingEtlProgress } = useBoolean(false);
-    const [definitionCache] = useState(() => new etlScriptDefinitionCache(db.name));
     const [filter, setFilter] = useState<OngoingTasksFilterCriteria>({
         searchText: "",
         types: [],
     });
 
+    const getEtlStats = useCallback(
+        (location: databaseLocationSpecifier) => tasksService.getEtlStats(db.name, location),
+        [db.name]
+    );
+
+    const getTaskErrors = useCallback(
+        (location: databaseLocationSpecifier) => tasksService.getTaskErrors(db.name, location),
+        [db.name]
+    );
+
+    const { result: etlStatsResult } = useDatabaseWideAsync(getEtlStats);
+    const { result: taskErrorsResult } = useDatabaseWideAsync(getTaskErrors);
+
     const upgradeLicenseLink = useRavenLink({ hash: "FLDLO4", isDocs: false });
+    const isInitialLoadDone = tasks.locationsLoadStatus.some((x) => x.status !== "idle");
+    const allLocationsFailed = tasks.locationsLoadStatus.every((x) => x.status === "failure");
+
+    const pendingLocations = useRef<databaseLocationSpecifier[]>([]);
 
     const fetchTasks = useCallback(
         async (location: databaseLocationSpecifier) => {
+            if (pendingLocations.current.some((x) => databaseLocationComparator(x, location))) {
+                return;
+            }
+            pendingLocations.current.push(location);
+
             try {
-                const tasks = await tasksService.getOngoingTasks(db.name, location);
+                const tasks = await tasksService.getOngoingTasks(db?.name, location);
                 dispatch({
                     type: "TasksLoaded",
                     location,
                     tasks,
                 });
+
+                const hasEtlOrAi = (tasks.OngoingTasks ?? []).some((t) =>
+                    etlAndAiTaskTypes.includes(t.TaskType as EtlOrAiOngoingTaskType)
+                );
+                if (hasEtlOrAi) {
+                    startTrackingEtlProgress();
+                }
             } catch (e) {
-                const errorAndMessage = recentError.tryExtractMessageAndException(e.responseText);
                 dispatch({
                     type: "TasksLoadError",
                     location,
-                    error: errorAndMessage.message + (errorAndMessage.error ? ": " + errorAndMessage.error : ""),
+                    error: getRequestErrorMessage(e),
                 });
+            } finally {
+                pendingLocations.current = pendingLocations.current.filter(
+                    (x) => !databaseLocationComparator(x, location)
+                );
             }
         },
-        [db, tasksService, dispatch]
+        [db, tasksService, dispatch, startTrackingEtlProgress]
     );
 
     const reload = useCallback(async () => {
         // if database is sharded we need to load from both orchestrator and target node point of view
         // in case of non-sharded - we have single level: node
+        const orchestratorLocations: databaseLocationSpecifier[] = db?.isSharded
+            ? db.nodes.map((node) => ({ nodeTag: node.tag }))
+            : [];
 
-        if (db.isSharded) {
-            const orchestratorTasks = db.nodes.map((node) => fetchTasks({ nodeTag: node.tag }));
-            await Promise.all(orchestratorTasks);
-        }
-
-        const loadTasks = tasks.locations.map(fetchTasks);
-        await Promise.all(loadTasks);
+        await Promise.all([...orchestratorLocations, ...tasks.locations].map(fetchTasks));
     }, [tasks, fetchTasks, db]);
 
     useInterval(reload, 10_000);
@@ -180,15 +239,6 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
         [dispatch]
     );
 
-    const showItemPreview = useCallback(
-        (task: OngoingTaskInfo, scriptName: string) => {
-            const taskType = TaskUtils.studioTaskTypeToTaskType(task.shared.taskType);
-            const etlType = TaskUtils.taskTypeToEtlType(taskType);
-            definitionCache.showDefinitionFor(etlType, task.shared.taskId, scriptName);
-        },
-        [definitionCache]
-    );
-
     const filteredTasks = getFilteredTasks(tasks, filter);
 
     const {
@@ -204,6 +254,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
         amazonSqsEtls,
         kafkaSinks,
         rabbitMqSinks,
+        azureServiceBusSinks,
+        cdcSinks,
         elasticSearchEtls,
         embeddingsGenerations,
         genAiTasks,
@@ -230,7 +282,16 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
         ...amazonSqsEtls,
     ];
 
-    const sinks = [...kafkaSinks, ...rabbitMqSinks];
+    const flatEtlStats: EtlTaskStats[] = etlStatsResult.flatMap((x) => x.data ?? []);
+    const flatTaskErrors: TaskErrorsWithLocation[] = taskErrorsResult.flatMap((x) =>
+        (x.data ?? []).map((e) => ({
+            ...e,
+            nodeTag: x.location.nodeTag,
+            shardNumber: x.location.shardNumber,
+        }))
+    );
+
+    const sinks = [...kafkaSinks, ...rabbitMqSinks, ...azureServiceBusSinks, ...cdcSinks];
 
     useEffect(() => {
         throttledUpdateLicenseLimitsUsage();
@@ -266,10 +327,16 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
         tasks.subscriptions.length +
         (DatabaseUtils.hasInternalReplication(db) ? 1 : 0);
 
+    const aiTasksCount = tasks.tasks.filter((x) =>
+        ["GenAi", "EmbeddingsGeneration"].includes(x.shared.taskType)
+    ).length;
+
+    const relevantTasksCount = isAiOnly ? aiTasksCount : allTasksCount;
+
     const refreshSubscriptionInfo = async (taskId: number, taskName: string) => {
-        const loadTasks = db.nodes.map(async (nodeInfo) => {
+        const loadTasks = (db?.nodes ?? []).map(async (nodeInfo) => {
             const nodeTag = nodeInfo.tag;
-            const task = await tasksService.getSubscriptionTaskInfo(db.name, taskId, taskName, nodeTag);
+            const task = await tasksService.getSubscriptionTaskInfo(db?.name, taskId, taskName, nodeTag);
 
             dispatch({
                 type: "SubscriptionInfoLoaded",
@@ -301,7 +368,7 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
             // ask only responsible node for connection details
             // if case of sharded database it points to responsible orchestrator
             const details = await tasksService.getSubscriptionConnectionDetails(
-                db.name,
+                db?.name,
                 taskId,
                 taskName,
                 targetNode.ResponsibleNode.NodeTag
@@ -322,7 +389,7 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
     };
 
     const dropSubscription = async (taskId: number, taskName: string, nodeTag: string, workerId: string) => {
-        await tasksService.dropSubscription(db.name, taskId, taskName, nodeTag, workerId);
+        await tasksService.dropSubscription(db?.name, taskId, taskName, nodeTag, workerId);
     };
 
     const { onTaskOperation, operationConfirm, cancelOperationConfirm, isTogglingState, isDeleting } =
@@ -363,6 +430,18 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
     );
 
     const showInternalReplication = !isAiOnly && DatabaseUtils.hasInternalReplication(db);
+
+    if (!isInitialLoadDone) {
+        return <LoadingView />;
+    }
+
+    if (allLocationsFailed) {
+        return (
+            <div className="content-margin">
+                <LoadError error={tasks.locationsLoadStatus[0].error} refresh={reload} />
+            </div>
+        );
+    }
 
     return (
         <div className="content-margin ongoing-tasks-page">
@@ -424,7 +503,7 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
             {operationConfirm && <OngoingTaskOperationConfirm {...operationConfirm} toggle={cancelOperationConfirm} />}
             <OngoingTasksHeader
                 reload={reload}
-                allTasksCount={allTasksCount}
+                allTasksCount={relevantTasksCount}
                 tasks={tasks}
                 hasInternalReplication={DatabaseUtils.hasInternalReplication(db)}
                 selectedTaskIds={selectedTaskIds}
@@ -437,7 +516,7 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
             <Row className="gy-sm">
                 <div className="flex-vertical">
                     <div className="scroll flex-grow">
-                        {allTasksCount === 0 && !showInternalReplication && (
+                        {relevantTasksCount === 0 && !showInternalReplication && (
                             <EmptySet>No tasks have been created for this Database Group.</EmptySet>
                         )}
                         {showInternalReplication && internalReplications.length > 0 && (
@@ -460,8 +539,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                         {...sharedPanelProps}
                                         key={taskKey(x.shared)}
                                         data={x}
-                                        onToggleDetails={startTrackingEtlProgress}
-                                        showItemPreview={showItemPreview}
+                                        etlStats={flatEtlStats}
+                                        taskErrors={flatTaskErrors}
                                     />
                                 ))}
                                 {embeddingsGenerations.map((x) => (
@@ -469,8 +548,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                         {...sharedPanelProps}
                                         key={taskKey(x.shared)}
                                         data={x}
-                                        onToggleDetails={startTrackingEtlProgress}
-                                        showItemPreview={showItemPreview}
+                                        etlStats={flatEtlStats}
+                                        taskErrors={flatTaskErrors}
                                     />
                                 ))}
                             </div>
@@ -599,8 +678,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {elasticSearchEtls.map((x) => (
@@ -608,8 +687,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {kafkaEtls.map((x) => (
@@ -617,8 +696,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {sqlEtls.map((x) => (
@@ -626,8 +705,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {snowflakeEtls.map((x) => (
@@ -635,8 +714,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {olapEtls.map((x) => (
@@ -644,8 +723,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {rabbitMqEtls.map((x) => (
@@ -653,8 +732,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {azureQueueStorageEtls.map((x) => (
@@ -662,8 +741,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                         {amazonSqsEtls.map((x) => (
@@ -671,8 +750,8 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                                 {...sharedPanelProps}
                                                 key={taskKey(x.shared)}
                                                 data={x}
-                                                onToggleDetails={startTrackingEtlProgress}
-                                                showItemPreview={showItemPreview}
+                                                etlStats={flatEtlStats}
+                                                taskErrors={flatTaskErrors}
                                             />
                                         ))}
                                     </div>
@@ -689,6 +768,21 @@ export function OngoingTasksPage({ isAiOnly = false }: OngoingTasksPageProps) {
                                         ))}
                                         {rabbitMqSinks.map((x) => (
                                             <RabbitMqSinkPanel {...sharedPanelProps} key={taskKey(x.shared)} data={x} />
+                                        ))}
+                                        {azureServiceBusSinks.map((x) => (
+                                            <AzureServiceBusSinkPanel
+                                                {...sharedPanelProps}
+                                                key={taskKey(x.shared)}
+                                                data={x}
+                                            />
+                                        ))}
+                                        {cdcSinks.map((x) => (
+                                            <CdcSinkPanel
+                                                {...sharedPanelProps}
+                                                key={taskKey(x.shared)}
+                                                data={x}
+                                                taskErrors={flatTaskErrors}
+                                            />
                                         ))}
                                     </div>
                                 )}
@@ -730,7 +824,10 @@ function filterOngoingTask(sharedInfo: OngoingTaskSharedInfo, filter: OngoingTas
 
     const isSinkTypeMatching =
         filter.types.includes("Sink") &&
-        (sharedInfo.taskType === "KafkaQueueSink" || sharedInfo.taskType === "RabbitQueueSink");
+        (sharedInfo.taskType === "KafkaQueueSink" ||
+            sharedInfo.taskType === "RabbitQueueSink" ||
+            sharedInfo.taskType === "AzureServiceBusQueueSink" ||
+            sharedInfo.taskType === "CdcSink");
 
     const isBackupTypeMatching = filter.types.includes("Backup") && sharedInfo.taskType === "Backup";
 
@@ -784,6 +881,10 @@ function getFilteredTasks(state: OngoingTasksState, filter: OngoingTasksFilterCr
         rabbitMqSinks: filteredTasks.filter(
             (x) => x.shared.taskType === "RabbitQueueSink"
         ) as OngoingTaskRabbitMqSinkInfo[],
+        azureServiceBusSinks: filteredTasks.filter(
+            (x) => x.shared.taskType === "AzureServiceBusQueueSink"
+        ) as OngoingTaskAzureServiceBusSinkInfo[],
+        cdcSinks: filteredTasks.filter((x) => x.shared.taskType === "CdcSink") as OngoingTaskCdcSinkInfo[],
         elasticSearchEtls: filteredTasks.filter(
             (x) => x.shared.taskType === "ElasticSearchEtl"
         ) as OngoingTaskElasticSearchEtlInfo[],

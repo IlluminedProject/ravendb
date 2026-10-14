@@ -25,6 +25,7 @@ class genUtils {
     static readonly basicDateFormat = "YYYY-MM-DD";
     static readonly dateFormat = "YYYY MMMM Do, h:mm A";
     static readonly utcFullDateFormat = "YYYY-MM-DD[T]HH:mm:ss.SSS[Z]";
+    static readonly timeSeriesFullDateFormat = "YYYY-MM-DD HH:mm:ss.SSS";
     
     /***  IP Address Methods  ***/
 
@@ -185,7 +186,7 @@ class genUtils {
         const futureTime = timeDiff < 0; 
         const diff = futureTime ? timeDiff * -1 : timeDiff;
         
-        const duration = genUtils.formatDuration(moment.duration(diff), true, 2, true);
+        const duration = genUtils.formatDuration(moment.duration(diff), true, 2, true).trim();
         
         if (!addTimeText) {
             return duration; 

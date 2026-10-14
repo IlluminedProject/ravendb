@@ -39,10 +39,13 @@ interface computedAppUrls {
     editAmazonSqsEtl: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
     editKafkaSink: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
     editRabbitMqSink: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
+    editAzureServiceBusSink: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
+    editCdcSink: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
     editEmbeddingsGeneration: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
     editGenAi: (taskId?: number, taskName?: string) => KnockoutComputed<string>;
     query: (indexName?: string) => KnockoutComputed<string>;
     terms: (indexName?: string) => KnockoutComputed<string>;
+    importDataOptionsUrl: KnockoutComputed<string>;
     importDatabaseFromFileUrl: KnockoutComputed<string>;
     importCollectionFromCsv: KnockoutComputed<string>;
     importDatabaseFromSql: KnockoutComputed<string>;
@@ -52,7 +55,7 @@ interface computedAppUrls {
     sampleDataUrl: KnockoutComputed<string>;
     backupsUrl: KnockoutComputed<string>;
     ongoingTasksUrl: KnockoutComputed<string>;
-    addNewOngoingTask: (isAiOnly: boolean) => KnockoutComputed<string>;
+    addNewOngoingTaskUrl: (isAiOnly: boolean, noBack?: boolean) => KnockoutComputed<string>;
     editExternalReplicationTaskUrl: KnockoutComputed<string>;
     editReplicationHubTaskUrl: KnockoutComputed<string>;
     editReplicationSinkTaskUrl: KnockoutComputed<string>;
@@ -68,6 +71,8 @@ interface computedAppUrls {
     editAmazonSqsEtlTaskUrl: KnockoutComputed<string>;
     editKafkaSinkTaskUrl: KnockoutComputed<string>;
     editRabbitMqSinkTaskUrl: KnockoutComputed<string>;
+    editAzureServiceBusSinkTaskUrl: KnockoutComputed<string>;
+    editCdcSinkTaskUrl: KnockoutComputed<string>;
     editEmbeddingsGenerationTaskUrl: KnockoutComputed<string>;
     editGenAiTaskUrl: KnockoutComputed<string>;
     csvImportUrl: KnockoutComputed<string>;
@@ -99,6 +104,7 @@ interface computedAppUrls {
     conflictResolution: KnockoutComputed<string>;
     revisionsBinCleaner: KnockoutComputed<string>;
     remoteAttachments: KnockoutComputed<string>;
+    tasksError: KnockoutComputed<string>;
 
     about: KnockoutComputed<string>;
     whatsNew: KnockoutComputed<string>;
@@ -119,4 +125,5 @@ interface computedAppUrls {
     chatAiAgent: (id: string) => KnockoutComputed<string>;
     aiTasks: KnockoutComputed<string>;
     aiTasksStats: KnockoutComputed<string>;
+    aiTasksErrors: KnockoutComputed<string>;
 }

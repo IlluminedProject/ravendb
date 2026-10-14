@@ -32,6 +32,7 @@ using Raven.Server.Documents.Patch;
 using Raven.Server.Documents.PeriodicBackup;
 using Raven.Server.Documents.PeriodicBackup.Restore;
 using Raven.Server.Documents.Queries;
+using Raven.Server.Documents.CdcSink;
 using Raven.Server.Documents.QueueSink;
 using Raven.Server.Documents.Replication;
 using Raven.Server.Documents.Smuggler;
@@ -78,6 +79,8 @@ using Raven.Server.Documents.SchemaValidation;
 using Raven.Server.Documents.Handlers.AI.Agents;
 using Sparrow.Server.Logging;
 using Sparrow.Server.Utils;
+using Sparrow.Utils;
+using Raven.Server.Documents.TasksErrors;
 
 namespace Raven.Server.Documents
 {
@@ -195,6 +198,7 @@ namespace Raven.Server.Documents
                 MetricCacher = new DatabaseMetricCacher(this);
                 TxMerger = new DocumentsTransactionOperationsMerger(this);
                 ConfigurationStorage = new ConfigurationStorage(this);
+                TaskErrorsStorage = new TaskErrorsStorage();
                 NotificationCenter = new DatabaseNotificationCenter(this);
                 _clusterTransactionErrorNotifier = new ClusterTransactionErrorNotifier(NotificationCenter, Name);
                 HugeDocuments = new HugeDocuments(NotificationCenter, configuration.PerformanceHints.HugeDocumentsCollectionSize,
@@ -211,6 +215,7 @@ namespace Raven.Server.Documents
                 _hasClusterTransaction = new ManualResetEventSlim(false);
                 CountersRepairTask = new CountersRepairTask(this, DatabaseShutdown);
                 QueueSinkLoader = new QueueSinkLoader(this, serverStore);
+                CdcSinkLoader = new CdcSinkLoader(this, serverStore);
                 _proxyRequestExecutor = CreateRequestExecutor();
                 _serverStore.Server.ServerCertificateChanged += OnCertificateChange;
             }
@@ -329,6 +334,8 @@ namespace Raven.Server.Documents
 
         public DatabaseNotificationCenter NotificationCenter { get; private set; }
 
+        public TaskErrorsStorage TaskErrorsStorage { get; private set; }
+
         public DatabaseOperations Operations { get; private set; }
 
         public HugeDocuments HugeDocuments { get; }
@@ -344,6 +351,8 @@ namespace Raven.Server.Documents
         public EtlLoader EtlLoader { get; private set; }
 
         public QueueSinkLoader QueueSinkLoader { get; private set; }
+
+        public CdcSinkLoader CdcSinkLoader { get; private set; }
 
         public readonly ConcurrentSet<TcpConnectionOptions> RunningTcpConnections = new ConcurrentSet<TcpConnectionOptions>();
 
@@ -425,6 +434,8 @@ namespace Raven.Server.Documents
                 TxMerger.Start();
                 _addToInitLog(LogLevel.Debug, "Initializing ConfigurationStorage");
                 ConfigurationStorage.Initialize();
+                
+                TaskErrorsStorage.Initialize(DocumentsStorage.ContextPool, TxMerger);
 
                 _clusterTransactionErrorNotifier.Initialize();
 
@@ -449,6 +460,7 @@ namespace Raven.Server.Documents
                 OnDatabaseRecordChanged(record);
 
                 SupportedFeatures = new SupportedFeature(record);
+                DocumentsStorage.PersistSupportedFeatures(record.SupportedFeatures);
 
                 ReplicationLoader = CreateReplicationLoader();
                 PeriodicBackupRunner = new PeriodicBackupRunner(this, _serverStore, wakeup);
@@ -463,6 +475,9 @@ namespace Raven.Server.Documents
 
                 _addToInitLog(LogLevel.Debug, "Initializing Queue Sinks");
                 QueueSinkLoader.Initialize(record);
+
+                _addToInitLog(LogLevel.Debug, "Initializing CDC Sinks");
+                CdcSinkLoader.Initialize(record);
 
                 InitializeAndStartDocumentsMigration();
 
@@ -953,7 +968,7 @@ namespace Raven.Server.Documents
         {
             ForTestingPurposes?.DisposeLog?.Invoke(Name, "Starting dispose");
 
-            _databaseShutdown.Cancel();
+            _databaseShutdown.SafeCancel(_logger, $"{nameof(DocumentDatabase)}: {Name}");
 
             _serverStore.Server.ServerCertificateChanged -= OnCertificateChange;
 
@@ -1109,6 +1124,11 @@ namespace Raven.Server.Documents
                 QueueSinkLoader?.Dispose();
             });
             ForTestingPurposes?.DisposeLog?.Invoke(Name, "Disposed QueueSinkLoader");
+
+            exceptionAggregator.Execute(() =>
+            {
+                CdcSinkLoader?.Dispose();
+            });
 
             ForTestingPurposes?.DisposeLog?.Invoke(Name, "Disposing AI Integrations");
             exceptionAggregator.Execute(() =>
@@ -1697,7 +1717,7 @@ namespace Raven.Server.Documents
                         {
                             ClusterTag = _serverStore.NodeTag,
                             Database = Name,
-                            Url = ServerStore.GetNodeHttpServerUrl()
+                            Url = ServerStore.GetNodeClusterHttpServerUrl()
                         })
                         {
                             DebugTag = "database-topology-update"
@@ -1765,6 +1785,7 @@ namespace Raven.Server.Documents
             }
 
             QueueSinkLoader?.HandleDatabaseRecordChange(record);
+            CdcSinkLoader?.HandleDatabaseRecordChange(record);
 
             OnDatabaseRecordChanged(record);
         }
@@ -1885,6 +1906,7 @@ namespace Raven.Server.Documents
             if (record == null || DocumentsStorage == null)
                 return;
 
+            SupportedFeatures = new SupportedFeature(record);
             ClientConfiguration = record.Client;
             StudioConfiguration = record.Studio;
             InitializeCompressionFromDatabaseRecord(record);
@@ -1911,11 +1933,6 @@ namespace Raven.Server.Documents
 
             _documentsCompression = record.DocumentsCompression;
             _compressedCollections = new HashSet<string>(record.DocumentsCompression.Collections, StringComparer.OrdinalIgnoreCase);
-        }
-
-        public TableSchema GetDocsSchemaForCollection(CollectionName collection, DocumentFlags flags)
-        {
-            return flags.HasFlag(DocumentFlags.Archived) ? DocumentsStorage.CompressedDocsSchema : GetDocsSchemaForCollection(collection);
         }
 
         private void LoadTimeSeriesPolicyRunnerConfigurations()
@@ -2029,8 +2046,8 @@ namespace Raven.Server.Documents
 
         private Lazy<RequestExecutor> CreateRequestExecutor() =>
             new(
-                () => RequestExecutor.CreateForProxy(new[] { ServerStore.Configuration.Core.GetNodeHttpServerUrl(ServerStore.Server.WebUrl) }, Name,
-                    ServerStore.Server.Certificate.ClientCertificate, DocumentConventions.DefaultForServer), LazyThreadSafetyMode.ExecutionAndPublication);
+                () => RequestExecutor.CreateForProxy(new[] { ServerStore.GetNodeClusterHttpServerUrl() }, Name,
+                    ServerStore.Server.Certificate.ClientCertificate, DocumentConventions.DefaultForServer, usePrivateUrls: true), LazyThreadSafetyMode.ExecutionAndPublication);
 
         internal void HandleNonDurableFileSystemError(object sender, NonDurabilitySupportEventArgs e)
         {
@@ -2272,7 +2289,11 @@ namespace Raven.Server.Documents
 
             internal AsyncManualResetEvent DelayQueryByPatch;
 
+            internal AsyncManualResetEvent DelayDeleteBucket;
+
             internal bool EnableWritesToTheWrongShard = false;
+            
+            internal TimeSpan? EtlFallbackTime;
 
             internal IDisposable CallDuringDocumentDatabaseInternalDispose(Action action)
             {
@@ -2324,6 +2345,10 @@ namespace Raven.Server.Documents
             internal int BulkInsert_StreamReadTimeout;
             internal Action BulkInsert_OnHeartBeat;
 
+            internal Action<EtlProcess, ExtractedItem, int> OnEtlItemExtracted; // (process, item, batchId == EtlPerformanceStats.Id)
+
+            internal Action<EtlProcess> OnEtlBatchCompleted;
+
             internal Action<ConversationDocument> BeforeAiAgentTalk;
 
             internal Func<AiAgentConfiguration, LazyStringValue, bool> ShouldAiAgentAddMutualParameterForSubAgentReq;
@@ -2350,11 +2375,25 @@ namespace Raven.Server.Documents
 
             if (databaseRecord.SupportedFeatures.Contains(Constants.DatabaseRecord.SupportedFeatures.ThrowRevisionKeyTooBigFix))
                 SupportedFeatureTypes.ThrowRevisionKeyTooBigFix = true;
+
+            if (databaseRecord.SupportedFeatures.Contains(Constants.DatabaseRecord.SupportedFeatures.HashedRevisionPk))
+                SupportedFeatureTypes.HashedRevisionPk = true;
+
+            if (databaseRecord.SupportedFeatures.Contains(Constants.DatabaseRecord.SupportedFeatures.PullReplicationCompositeChangeVectors))
+                SupportedFeatureTypes.PullReplicationCompositeChangeVectors = true;
+            
+            if (databaseRecord.SupportedFeatures.Contains(Constants.DatabaseRecord.SupportedFeatures.ThrowControlCharactersInIdentifier))
+                SupportedFeatureTypes.ThrowControlCharactersInIdentifier = true;
         }
     }
 
     public class SupportedFeatureTypes
     {
         public bool ThrowRevisionKeyTooBigFix;
+        // Gate matching the HashedRevisionPk wire token; suppresses the raw-form probe in DualFormProbe
+        // on born-clean databases.
+        public bool HashedRevisionPk;
+        public bool PullReplicationCompositeChangeVectors;
+        public bool ThrowControlCharactersInIdentifier;
     }
 }

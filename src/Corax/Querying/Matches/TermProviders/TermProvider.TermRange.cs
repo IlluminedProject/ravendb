@@ -53,23 +53,50 @@ public struct TermRangeProvider<TLookupIterator, TLow, THigh> : ITermProvider, I
         _skipRangeCheck = _isForward
             ? _high.Options is SliceOptions.AfterAllKeys
             : _low.Options is SliceOptions.BeforeAllKeys;
+
+        // Same collapse as in TermNumericRangeProvider - PrepareKeys would put the stop term behind the start one.
+        if (IsEmptyRange())
+        {
+            _isEmpty = true;
+            return;
+        }
+
         PrepareKeys();
         Reset();
+    }
+
+    private bool IsEmptyRange()
+    {
+        // BeforeAllKeys sorts below every term, AfterAllKeys above it - and the mirrored forms are contradictory.
+        if (_low.Options is SliceOptions.BeforeAllKeys || _high.Options is SliceOptions.AfterAllKeys)
+            return false;
+
+        if (_low.Options is SliceOptions.AfterAllKeys || _high.Options is SliceOptions.BeforeAllKeys)
+            return true;
+
+        var cmp = _low.AsSpan().SequenceCompareTo(_high.AsSpan());
+        if (cmp > 0)
+            return true;
+
+        // <x, x> holds x; (x, x>, <x, x) and (x, x) are empty.
+        return cmp == 0 && (typeof(TLow) == typeof(Range.Exclusive) || typeof(THigh) == typeof(Range.Exclusive));
     }
 
 
     private void PrepareKeys()
     {
-        CompactKey key;
         ReadOnlySpan<byte> termSlice;
 
         var startKey = _isForward ? _low : _high;
         var finalKey = _isForward ? _high : _low;
 
+        using var scope = new CompactKeyCacheScope(_indexSearcher._transaction.LowLevelTransaction);
+        CompactKey key = scope.Key;
+
         if (ShouldSeek())
         {
             _iterator.Seek(startKey);
-            if (_iterator.MoveNext(out key, out _, out _) == false)
+            if (_iterator.MoveNext(key, out _, out _) == false)
             {
                 _isEmpty = true;
                 return; //empty set, we will go out of range immediately 
@@ -89,7 +116,7 @@ public struct TermRangeProvider<TLookupIterator, TLow, THigh> : ITermProvider, I
 
             if (shouldInclude == false)
             {
-                if (_iterator.MoveNext(out key, out _, out _) == false)
+                if (_iterator.MoveNext(key, out _, out _) == false)
                 {
                     _isEmpty = true;
                     return; //empty set, we will go out of range immediately
@@ -115,7 +142,7 @@ public struct TermRangeProvider<TLookupIterator, TLow, THigh> : ITermProvider, I
 
 
         _iterator.Seek(finalKey);
-        if (_iterator.MoveNext(out key, out _endContainerId, out var hasPreviousValue) == false)
+        if (_iterator.MoveNext(key, out _endContainerId, out var hasPreviousValue) == false)
         {
             _skipRangeCheck = true; //we are out of item anyway that means we can accept all items
             _endContainerId = long.MaxValue;
@@ -230,9 +257,9 @@ public struct TermRangeProvider<TLookupIterator, TLow, THigh> : ITermProvider, I
         }
         
         var allocator = _indexSearcher.Allocator;
-        CompactKey compactKey = new();
-        compactKey.Initialize(_indexSearcher._transaction.LowLevelTransaction);
-        
+        using var scope = new CompactKeyCacheScope(_indexSearcher._transaction.LowLevelTransaction);
+        CompactKey compactKey = scope.Key;
+
         NativeList<long> postingLists = new();
         postingLists.Initialize(allocator);
         

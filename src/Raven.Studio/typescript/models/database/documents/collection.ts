@@ -6,6 +6,7 @@ class collection {
     static readonly allRevisionsCollectionName = "All Revisions";
     static readonly revisionsBinCollectionName = "Revisions Bin";
     static readonly hiloCollectionName = "@hilo";
+    static readonly emptyCollectionName = "@empty";
 
     documentCount: KnockoutObservable<number> = ko.observable(0);
     lastDocumentChangeVector = ko.observable<string>();
@@ -49,6 +50,10 @@ class collection {
 
     get isRevisionsBin() {
         return this.name === collection.revisionsBinCollectionName;
+    }
+
+    get isSystem() {
+        return this.name.startsWith('@') && this.name !== collection.emptyCollectionName;
     }
 
     get collectionNameForQuery() {

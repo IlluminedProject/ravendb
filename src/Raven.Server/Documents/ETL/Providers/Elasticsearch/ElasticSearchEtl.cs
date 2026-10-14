@@ -23,6 +23,7 @@ using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
 using Sparrow.Json;
 using Sparrow.Json.Parsing;
+using Raven.Server.Documents.TasksErrors;
 
 namespace Raven.Server.Documents.ETL.Providers.ElasticSearch
 {
@@ -293,10 +294,12 @@ namespace Raven.Server.Documents.ETL.Providers.ElasticSearch
                     Commands = commands.ToArray()
                 });
             }
+
+            var etlItemErrors = Statistics.ReadInMemoryItemErrors();
             
             return new ElasticSearchEtlTestScriptResult
             {
-                TransformationErrors = Statistics.TransformationErrorsInCurrentBatch.Errors.ToList(),
+                TransformationErrors = etlItemErrors.Where(x => x.Step == TaskErrorStep.Transformation).ToList(),
                 Summary = summaries
             };
         }

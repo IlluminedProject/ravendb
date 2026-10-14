@@ -1,16 +1,10 @@
-import { AboutViewAnchored, AccordionItemWrapper } from "components/common/AboutView";
+import { AboutViewFloating, AccordionItemWrapper } from "components/common/AboutView";
 import React from "react";
 
 export default function IndexErrorsAboutView() {
     return (
-        <AboutViewAnchored>
-            <AccordionItemWrapper
-                targetId="about"
-                icon="about"
-                color="info"
-                heading="About this view"
-                description="Get additional info on this feature"
-            >
+        <AboutViewFloating>
+            <AccordionItemWrapper targetId="about" icon="about" color="info">
                 <p>
                     An indexing error can occur during indexing if the indexing function is malformed or if the document
                     data is corrupted or missing. When the error rate exceeds a certain threshold, the index state is
@@ -27,15 +21,15 @@ export default function IndexErrorsAboutView() {
                         <i>map</i>,<i>reduce</i>, or <i>analyzer</i>.
                     </li>
                     <li className="mt-1">
-                        <strong>Clear errors</strong>
+                        <strong>Delete errors</strong>
                         <br />
-                        You can clear errors for selected indexes.
+                        You can delete errors for selected indexes.
                         <br />
-                        Note that clearing errors only removes the errors; the index state will not change. It will
+                        Note that deleting errors only removes the errors; the index state will not change. It will
                         remain in an <b>Error</b> state and will not be set back to the <b>Normal</b> state.
                     </li>
                 </ul>
             </AccordionItemWrapper>
-        </AboutViewAnchored>
+        </AboutViewFloating>
     );
 }

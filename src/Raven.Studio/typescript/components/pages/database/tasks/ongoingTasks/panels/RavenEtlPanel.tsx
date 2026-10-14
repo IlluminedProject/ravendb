@@ -1,4 +1,4 @@
-﻿import React, { useCallback } from "react";
+﻿import React from "react";
 import {
     RichPanel,
     RichPanelActions,
@@ -10,8 +10,8 @@ import {
 } from "components/common/RichPanel";
 import {
     ConnectionStringItem,
+    DestinationUrlItem,
     EmptyScriptsWarning,
-    ICanShowTransformationScriptPreview,
     OngoingTaskActions,
     OngoingTaskName,
     OngoingTaskResponsibleNode,
@@ -19,73 +19,37 @@ import {
 } from "../../shared/shared";
 import { useAppUrls } from "hooks/useAppUrls";
 import { OngoingTaskRavenEtlInfo } from "components/models/tasks";
-import { BaseOngoingTaskPanelProps, useTasksOperations } from "../../shared/shared";
 import { OngoingEtlTaskDistribution } from "../partials/OngoingEtlTaskDistribution";
 import Collapse from "react-bootstrap/Collapse";
 import Form from "react-bootstrap/Form";
 import { databaseSelectors } from "components/common/shell/databaseSliceSelectors";
 import { useAppSelector } from "components/store";
-import { accessManagerSelectors } from "components/common/shell/accessManagerSliceSelectors";
 import { Icon } from "components/common/Icon";
+import { EtlPanelBaseProps, useEtlPanel } from "./etlPanelUtils";
+import { TaskPanelErrors, EtlPanelHealthBadge, EtlPanelProgressItem, EtlPanelToggleButton } from "./EtlPanelComponents";
 
-type RavenEtlPanelProps = BaseOngoingTaskPanelProps<OngoingTaskRavenEtlInfo>;
+type RavenEtlPanelProps = EtlPanelBaseProps<OngoingTaskRavenEtlInfo>;
 
-function Details(props: RavenEtlPanelProps & { canEdit: boolean }) {
-    const { data, canEdit } = props;
-    const connectionStringDefined = !!data.shared.destinationDatabase;
-    const { appUrl } = useAppUrls();
-    const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
-    const connectionStringsUrl = appUrl.forConnectionStrings(databaseName, "Raven", data.shared.connectionStringName);
+export function RavenEtlPanel(props: RavenEtlPanelProps) {
+    const { data, toggleSelection, isSelected, onTaskOperation, isDeleting, isTogglingState, etlStats } = props;
 
-    return (
-        <RichPanelDetails>
-            <ConnectionStringItem
-                connectionStringDefined={connectionStringDefined}
-                canEdit={canEdit}
-                connectionStringName={data.shared.connectionStringName}
-                connectionStringsUrl={connectionStringsUrl}
-            />
-            {data.shared.destinationDatabase && (
-                <RichPanelDetailItem label="Destination Database">
-                    {data.shared.destinationDatabase}
-                </RichPanelDetailItem>
-            )}
-            <RichPanelDetailItem label="Actual Destination URL">
-                {data.shared.destinationUrl ? (
-                    <a href={data.shared.destinationUrl} target="_blank">
-                        {data.shared.destinationUrl}
-                    </a>
-                ) : (
-                    <div>N/A</div>
-                )}
-            </RichPanelDetailItem>
-            {data.shared.topologyDiscoveryUrls?.length > 0 && (
-                <RichPanelDetailItem label="Topology Discovery URLs">
-                    {data.shared.topologyDiscoveryUrls.join(", ")}
-                </RichPanelDetailItem>
-            )}
-            <EmptyScriptsWarning task={data} />
-        </RichPanelDetails>
-    );
-}
-
-export function RavenEtlPanel(props: RavenEtlPanelProps & ICanShowTransformationScriptPreview) {
-    const { data, showItemPreview, toggleSelection, isSelected, onTaskOperation, isDeleting, isTogglingState } = props;
-
-    const hasDatabaseAdminAccess = useAppSelector(accessManagerSelectors.getHasDatabaseAdminAccess)();
     const { forCurrentDatabase } = useAppUrls();
-
-    const canEdit = hasDatabaseAdminAccess && !data.shared.serverWide;
     const editUrl = forCurrentDatabase.editRavenEtl(data.shared.taskId)();
 
-    const { detailsVisible, toggleDetails, onEdit } = useTasksOperations(editUrl, props);
+    const {
+        canEdit,
+        goToTaskErrors,
+        detailsVisible,
+        toggleDetails,
+        onEdit,
+        taskHealth,
+        errorCount,
+        errorsByLocation,
+        etlProgress,
+    } = useEtlPanel(props, editUrl);
 
-    const showPreview = useCallback(
-        (transformationName: string) => {
-            showItemPreview(data, transformationName);
-        },
-        [data, showItemPreview]
-    );
+    const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
+    const connectionStringDefined = !!data.shared.destinationDatabase;
 
     return (
         <RichPanel>
@@ -103,10 +67,6 @@ export function RavenEtlPanel(props: RavenEtlPanelProps & ICanShowTransformation
                     <OngoingTaskName task={data} canEdit={canEdit} editUrl={editUrl} />
                 </RichPanelInfo>
                 <RichPanelActions>
-                    <span>
-                        <Icon icon="ravendb-etl" />
-                        RavenDB ETL
-                    </span>
                     <OngoingTaskResponsibleNode task={data} />
                     <OngoingTaskStatus
                         task={data}
@@ -122,13 +82,49 @@ export function RavenEtlPanel(props: RavenEtlPanelProps & ICanShowTransformation
                         toggleDetails={toggleDetails}
                         isDeleting={isDeleting(data.shared.taskId)}
                         isDetailsOpen={detailsVisible}
+                        isEtl
                     />
                 </RichPanelActions>
             </RichPanelHeader>
+            <RichPanelDetails>
+                <EtlPanelToggleButton detailsVisible={detailsVisible} toggleDetails={toggleDetails} />
+                <RichPanelDetailItem label="Type">
+                    <Icon icon="ravendb-etl" />
+                    RavenDB ETL
+                </RichPanelDetailItem>
+                <ConnectionStringItem
+                    connectionStringDefined={connectionStringDefined}
+                    canEdit={canEdit}
+                    connectionStringName={data.shared.connectionStringName}
+                    connectionStringType="Raven"
+                    databaseName={databaseName}
+                />
+                <RichPanelDetailItem label="Destination Database" title={data.shared.destinationDatabase}>
+                    <div className="text-truncate" style={{ maxWidth: "200px" }}>
+                        {data.shared.destinationDatabase}
+                    </div>
+                </RichPanelDetailItem>
+                <DestinationUrlItem destinationUrl={data.shared.destinationUrl} />
+                <RichPanelDetailItem
+                    label="Topology Discovery URLs"
+                    title={data.shared.topologyDiscoveryUrls.join(", ")}
+                >
+                    <div className="text-truncate" style={{ maxWidth: "200px" }}>
+                        {data.shared.topologyDiscoveryUrls.join(", ")}
+                    </div>
+                </RichPanelDetailItem>
+                <EtlPanelHealthBadge taskHealth={taskHealth} />
+                <TaskPanelErrors
+                    errorCount={errorCount}
+                    errorsByLocation={errorsByLocation}
+                    goToTaskErrors={goToTaskErrors}
+                />
+                <EtlPanelProgressItem etlProgress={etlProgress} />
+                <EmptyScriptsWarning task={data} />
+            </RichPanelDetails>
             <Collapse in={detailsVisible}>
                 <div>
-                    <Details {...props} canEdit={canEdit} />
-                    <OngoingEtlTaskDistribution task={data} showPreview={showPreview} />
+                    <OngoingEtlTaskDistribution task={data} etlStats={etlStats} />
                 </div>
             </Collapse>
         </RichPanel>

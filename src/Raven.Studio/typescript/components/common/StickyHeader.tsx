@@ -1,15 +1,16 @@
-﻿import React, { ReactNode } from "react";
+﻿import React, { HTMLAttributes, ReactNode } from "react";
 import classNames from "classnames";
-
 import "./StickyHeader.scss";
 
-interface StickyHeaderProps {
-    children: ReactNode | ReactNode[];
-    className?: string;
+interface StickyHeaderProps extends HTMLAttributes<HTMLDivElement> {
+    children: ReactNode;
+    flush?: boolean;
 }
 
-export function StickyHeader(props: StickyHeaderProps) {
-    const { children, className } = props;
-
-    return <div className={classNames("sticky-header", className)}>{children}</div>;
+export function StickyHeader({ flush, children, className, ...rest }: StickyHeaderProps) {
+    return (
+        <div {...rest} className={classNames("sticky-header", className, flush && "m-0 p-0")}>
+            {children}
+        </div>
+    );
 }

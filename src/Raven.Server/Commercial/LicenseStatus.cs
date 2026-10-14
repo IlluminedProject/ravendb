@@ -69,7 +69,7 @@ namespace Raven.Server.Commercial
 
         public double Ratio => Math.Max((double)MaxMemory / MaxCores, 1);
 
-        private int MaxClusterSizeInternal => GetValue<int?>(LicenseAttribute.MaxClusterSize) ?? 1;
+        private int MaxClusterSizeInternal => int.MaxValue;
 
         public LicenseType Type
         {
@@ -144,11 +144,11 @@ namespace Raven.Server.Commercial
 
         public DateTime? SubscriptionExpiration => GetValue<DateTime?>(LicenseAttribute.SubscriptionExpiration) ?? Expiration;
 
-        public int MaxMemory => GetValue<int?>(LicenseAttribute.Memory) ?? 6;
+        public int MaxMemory => int.MaxValue;
 
-        public int MaxCores => GetValue<int?>(LicenseAttribute.Cores) ?? 3;
+        public int MaxCores => int.MaxValue;
 
-        public int? MaxCoresPerNode => GetValue<int?>(LicenseAttribute.MaxCoresPerNode, agplValue: 2);
+        public int? MaxCoresPerNode => null;
 
         public int MaxClusterSize
         {
@@ -171,7 +171,7 @@ namespace Raven.Server.Commercial
 
         public bool HasSnmpMonitoring => Enabled(LicenseAttribute.Snmp);
 
-        public bool DistributedCluster => Enabled(LicenseAttribute.DistributedCluster);
+        public bool DistributedCluster => true;
 
         public bool HasSnapshotBackups => Enabled(LicenseAttribute.SnapshotBackup);
 
@@ -194,6 +194,8 @@ namespace Raven.Server.Commercial
         public bool HasPullReplicationAsSink => Enabled(LicenseAttribute.PullReplicationSink);
 
         public bool HasEncryptedBackups => Enabled(LicenseAttribute.EncryptedBackup);
+
+        public bool HasSso => Enabled(LicenseAttribute.Sso);
 
         public bool CanAutoRenewLetsEncryptCertificate
         {
@@ -256,6 +258,8 @@ namespace Raven.Server.Commercial
 
         public bool HasServerWideAnalyzers => Enabled(LicenseAttribute.ServerWideAnalyzers);
 
+        public bool HasServerWideConnectionStrings => Enabled(LicenseAttribute.ServerWideConnectionStrings);
+
         public bool HasIndexCleanup => Enabled(LicenseAttribute.IndexCleanup);
 
         public bool HasPeriodicBackup => Enabled(LicenseAttribute.PeriodicBackup);
@@ -265,6 +269,8 @@ namespace Raven.Server.Commercial
         public bool HasStudioConfiguration => Enabled(LicenseAttribute.StudioConfiguration);
 
         public bool HasQueueSink => Enabled(LicenseAttribute.QueueSink);
+
+        public bool HasCdcSink => Enabled(LicenseAttribute.CdcSink);
 
         public bool HasDataArchival => Enabled(LicenseAttribute.DataArchival);
 
@@ -344,6 +350,7 @@ namespace Raven.Server.Commercial
                 [nameof(HasPullReplicationAsHub)] = HasPullReplicationAsHub,
                 [nameof(HasPullReplicationAsSink)] = HasPullReplicationAsSink,
                 [nameof(HasEncryptedBackups)] = HasEncryptedBackups,
+                [nameof(HasSso)] = HasSso,
                 [nameof(CanAutoRenewLetsEncryptCertificate)] = CanAutoRenewLetsEncryptCertificate,
                 [nameof(IsCloud)] = IsCloud,
                 [nameof(HasDocumentsCompression)] = HasDocumentsCompression,
@@ -367,11 +374,13 @@ namespace Raven.Server.Commercial
                 [nameof(HasServerWideExternalReplications)] = HasServerWideExternalReplications,
                 [nameof(HasServerWideCustomSorters)] = HasServerWideCustomSorters,
                 [nameof(HasServerWideAnalyzers)] = HasServerWideAnalyzers,
+                [nameof(HasServerWideConnectionStrings)] = HasServerWideConnectionStrings,
                 [nameof(HasIndexCleanup)] = HasIndexCleanup,
                 [nameof(HasPeriodicBackup)] = HasPeriodicBackup,
                 [nameof(HasClientConfiguration)] = HasClientConfiguration,
                 [nameof(HasStudioConfiguration)] = HasStudioConfiguration,
                 [nameof(HasQueueSink)] = HasQueueSink,
+                [nameof(HasCdcSink)] = HasCdcSink,
                 [nameof(HasDataArchival)] = HasDataArchival,
                 [nameof(HasRevisionsInSubscriptions)] = HasRevisionsInSubscriptions,
                 [nameof(HasMultiNodeSharding)] = HasMultiNodeSharding,

@@ -29,11 +29,15 @@ internal sealed class DatabaseTcpConnectionInfoHandlerProcessorForGet<TOperation
 
     private bool CanConnectViaPublicClusterTcpUrl()
     {
-        var senderUrl = RequestHandler.GetStringQueryString("senderUrl", required: false);
-        if (string.IsNullOrEmpty(senderUrl))
+        var clusterTopology = ServerStore.GetClusterTopology();
+        var nodeTag = RequestHandler.GetStringQueryString("nodeTag", required: false);
+        if (string.IsNullOrEmpty(nodeTag) == false && clusterTopology.Contains(nodeTag))
             return true;
 
-        var clusterTopology = ServerStore.GetClusterTopology();
+        var senderUrl = RequestHandler.GetStringQueryString("senderUrl", required: false);
+        if (string.IsNullOrEmpty(senderUrl))
+            return false;
+
         var (hasUrl, _) = clusterTopology.TryGetNodeTagByUrl(senderUrl);
         return hasUrl;
     }

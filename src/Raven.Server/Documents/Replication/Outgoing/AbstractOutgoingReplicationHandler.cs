@@ -72,6 +72,7 @@ namespace Raven.Server.Documents.Replication.Outgoing
         protected OutgoingReplicationStatsAggregator _lastStats;
         protected RavenLogger Logger;
         private DeescalatingWarnToDebugLogger _endOfStreamExceptionLogger;
+        private Exception _reportedFailure;
 
         public ServerStore Server => _server;
         public long LastSentDocumentEtag => _lastSentDocumentEtag;
@@ -83,7 +84,6 @@ namespace Raven.Server.Documents.Replication.Outgoing
         public string LastSentChangeVector;
         public string LastAcceptedChangeVector { get; set; }
         public long LastHeartbeatTicks;
-        public ReplicationNode Node => Destination;
         public string DestinationFormatted => $"{Destination.Url}/databases/{Destination.Database}";
 
         public int MissingAttachmentsRetries;
@@ -120,7 +120,7 @@ namespace Raven.Server.Documents.Replication.Outgoing
         public void Start()
         {
             _longRunningSendingWork =
-                PoolOfThreads.GlobalRavenThreadPool.LongRunning(x => HandleReplicationErrors(Replication), null, ThreadNames.ForOutgoingReplication(OutgoingReplicationThreadName,
+                PoolOfThreads.GlobalRavenThreadPool.LongRunning(x => RunReplicationWithErrorHandling(Replication), null, ThreadNames.ForOutgoingReplication(OutgoingReplicationThreadName,
                     _databaseName, Destination.FromString(), pullReplicationAsHub: false));
         }
 
@@ -457,15 +457,19 @@ namespace Raven.Server.Documents.Replication.Outgoing
 
         protected virtual DynamicJsonValue GetInitialHandshakeRequest()
         {
-            return new DynamicJsonValue
+            var request = new DynamicJsonValue
             {
                 ["Type"] = "GetLastEtag",
                 [nameof(ReplicationLatestEtagRequest.SourceDatabaseName)] = _databaseName,
-                [nameof(ReplicationLatestEtagRequest.SourceUrl)] = _server.GetNodeHttpServerUrl(),
+                [nameof(ReplicationLatestEtagRequest.SourceUrl)] = this is OutgoingExternalReplicationHandler or OutgoingPullReplicationHandler
+                    ? _server.GetNodeHttpServerUrl()
+                    : _server.GetNodeClusterHttpServerUrl(),
                 [nameof(ReplicationLatestEtagRequest.SourceTag)] = _server.NodeTag,
                 [nameof(ReplicationLatestEtagRequest.SourceMachineName)] = Environment.MachineName,
                 [nameof(ReplicationLatestEtagRequest.ReplicationsType)] = GetReplicationType()
             };
+
+            return request;
         }
 
         private ReplicationLatestEtagRequest.ReplicationType GetReplicationType()
@@ -547,7 +551,7 @@ namespace Raven.Server.Documents.Replication.Outgoing
             }
         }
 
-        internal void SendHeartbeat(string changeVector)
+        internal void SendHeartbeat(string databaseChangeVector, string lastSentSourceChangeVector)
         {
             AddReplicationPulse(ReplicationPulseDirection.OutgoingHeartbeat);
 
@@ -562,11 +566,18 @@ namespace Raven.Server.Documents.Replication.Outgoing
                         [nameof(ReplicationMessageHeader.LastDocumentEtag)] = _lastSentDocumentEtag,
                         [nameof(ReplicationMessageHeader.ItemsCount)] = 0
                     };
-                    if (changeVector != null)
+                    if (databaseChangeVector != null)
                     {
-                        LastSentChangeVector = changeVector;
-                        heartbeat[nameof(ReplicationMessageHeader.DatabaseChangeVector)] = changeVector;
+                        LastSentChangeVector = databaseChangeVector;
+                        heartbeat[nameof(ReplicationMessageHeader.DatabaseChangeVector)] = databaseChangeVector;
                     }
+
+                    if (string.IsNullOrEmpty(lastSentSourceChangeVector) == false)
+                    {
+                        LastSentChangeVector = lastSentSourceChangeVector;
+                        heartbeat[nameof(ReplicationMessageHeader.LastSentChangeVector)] = lastSentSourceChangeVector;
+                    }
+
                     context.Write(writer, heartbeat);
                     writer.Flush();
                 }
@@ -683,7 +694,12 @@ namespace Raven.Server.Documents.Replication.Outgoing
             throw new OperationCanceledException("The connection has been closed by the Dispose method");
         }
 
-        protected virtual void HandleReplicationErrors(Action replicationAction)
+        protected virtual void RunReplicationWithErrorHandling(Action replicationAction)
+        {
+            HandleReplicationErrors(replicationAction);
+        }
+
+        private void HandleReplicationErrors(Action replicationAction)
         {
             try
             {
@@ -741,6 +757,13 @@ namespace Raven.Server.Documents.Replication.Outgoing
 
             void HandleOperationCancelException(OperationCanceledException e)
             {
+                var reportedFailure = Interlocked.Exchange(ref _reportedFailure, null);
+                if (reportedFailure != null)
+                {
+                    OnFailed(reportedFailure);
+                    return;
+                }
+
                 if (Logger.IsDebugEnabled)
                     Logger.Debug($"Operation canceled on replication thread ({FromToString}). " +
                                 $"This is not necessarily due to an issue. Stopped the thread.");
@@ -867,7 +890,7 @@ namespace Raven.Server.Documents.Replication.Outgoing
 
             OnBeforeDispose();
 
-            _cts.Cancel();
+            _cts.SafeCancel(Logger, $"Failed to cancel {nameof(CancellationTokenSource)} while disposing of {GetType().Name} ({FromToString})");
 
             _tcpConnectionOptions.Dispose();
             DisposeTcpClient();
@@ -894,6 +917,17 @@ namespace Raven.Server.Documents.Replication.Outgoing
             }
 
             _connectionDisposed.Dispose();
+        }
+
+        internal void ReportFailure(Exception exception)
+        {
+            if (exception == null)
+                throw new ArgumentNullException(nameof(exception));
+
+            if (Interlocked.CompareExchange(ref _reportedFailure, exception, null) != null)
+                return;
+
+            _cts.SafeCancel(Logger, $"Failed to cancel {nameof(CancellationTokenSource)} while reporting failure for {GetType().Name} ({FromToString})");
         }
 
         private void DisposeTcpClient()

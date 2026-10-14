@@ -26,6 +26,7 @@ using Raven.Server.Documents.Queries.Highlightings;
 using Raven.Server.Documents.Queries.MoreLikeThis.Corax;
 using Raven.Server.Documents.Queries.Results;
 using Raven.Server.Documents.Queries.Timings;
+using Raven.Server.Indexing;
 using Raven.Server.Json;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
@@ -92,6 +93,27 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
         protected readonly IndexSearcher IndexSearcher;
 
         private readonly IndexFieldsMapping _fieldMappings;
+
+        private Dictionary<string, VectorChunkHighlightingCapture> _vectorChunkHighlightings;
+
+        internal void CaptureVectorChunkHighlighting(string fieldName, string taskId, float minimumSimilarity, List<byte[]> queryVectors)
+        {
+            _vectorChunkHighlightings ??= new Dictionary<string, VectorChunkHighlightingCapture>(StringComparer.OrdinalIgnoreCase);
+
+            // Multiple vector.search() calls can target the same field (e.g. searching for several query texts). They all
+            // resolve against the same embeddings, so merge their query vectors instead of letting the last call overwrite
+            // the earlier ones - otherwise only chunks near the last query text would be surfaced.
+            if (_vectorChunkHighlightings.TryGetValue(fieldName, out VectorChunkHighlightingCapture existing) && existing.TaskId == taskId)
+            {
+                existing.QueryVectors.AddRange(queryVectors);
+                // The merged vectors are matched as a union (nearest of any of them), so keep the least restrictive
+                // threshold - a chunk that satisfied one of the clauses must not be dropped because another was stricter.
+                existing.RelaxMinimumSimilarity(minimumSimilarity);
+                return;
+            }
+
+            _vectorChunkHighlightings[fieldName] = new VectorChunkHighlightingCapture(fieldName, taskId, minimumSimilarity, queryVectors);
+        }
         private readonly ByteStringContext _allocator;
 
         private readonly int _maxNumberOfOutputsPerDocument;
@@ -108,7 +130,17 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
             {
                 MaxMemoizationSizeInBytes = index.Configuration.MaxMemoizationSize.GetValue(SizeUnit.Bytes),
             };
-            
+
+            // Pick up the per-field HNSW vector node caches that CoraxIndexPersistence attached
+            // to this transaction's ImmutableExternalState at creation time. The transaction
+            // holds the only reference the IndexSearcher needs; once the transaction disposes
+            // and no other transaction is still keeping the cache alive, GC reclaims it.
+            if (readTransaction.LowLevelTransaction.ImmutableExternalState is IndexTransactionCache txCache
+                && txCache.VectorNodeCaches is { Count: > 0 } vectorCaches)
+            {
+                IndexSearcher.AttachVectorNodeCaches(vectorCaches);
+            }
+
             if (index is {_forTestingPurposes: {CoraxConfiguration: not null}})
                 IndexSearcher.SetTestingConfiguration(index._forTestingPurposes.CoraxConfiguration);
             
@@ -619,6 +651,7 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
             THasProjection hasProjections = default;
             THighlighting highlightings = default;
             highlightings.Initialize(query, queryTimings);
+            _vectorChunkHighlightings = null;
 
             long docsToLoad = pageSize;
             bool runQuery = true;
@@ -628,7 +661,7 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                 OrderMetadata[] orderByFields;
 
                 CoraxQueryBuilder.Parameters builderParameters;
-                using (queryTimings?.For(nameof(QueryTimingsScope.Names.Corax), start: false)?.Start())
+                using (var coraxTimings = queryTimings?.For(nameof(QueryTimingsScope.Names.Corax), start: false)?.Start())
                 {
                     IDisposable releaseServerContext = null;
                     IDisposable closeServerTransaction = null;
@@ -643,7 +676,7 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                         }
 
                         builderParameters = new CoraxQueryBuilder.Parameters(IndexSearcher, _allocator, serverContext, documentsContext, query, _index,
-                            query.QueryParameters, QueryBuilderFactories, _fieldMappings, fieldsToFetch, highlightings.Terms, (int)take, deduplicationDisabled: false, indexReadOperation: this, token: token, queryTime: queryTime);
+                            query.QueryParameters, QueryBuilderFactories, _fieldMappings, fieldsToFetch, highlightings.Terms, (int)take, deduplicationDisabled: false, indexReadOperation: this, token: token, queryTime: queryTime, queryTimings: coraxTimings);
 
                         using (closeServerTransaction)
                         {
@@ -673,7 +706,7 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                 {
                     sortingData = new()
                     {
-                        ScoresBuffer = _index.Configuration.CoraxIncludeDocumentScore && builderParameters is {HasBoost: true}
+                        ScoresBuffer = builderParameters.NeedsScoresBuffer()
                             ? ScorePool.Rent(bufferSize)
                             : null,
                         DistancesBuffer = _index.Configuration.CoraxIncludeSpatialDistance && hasOrderByDistance
@@ -888,10 +921,18 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
                 return default;
             }
 
+            var highlightingResult = highlightings.Execute(query, documentsContext, _fieldMappings, ref entryReader, highlightingFields, document, IndexSearcher);
+
+            if (_vectorChunkHighlightings is { Count: > 0 } && document != null)
+            {
+                highlightingResult ??= new Dictionary<string, Dictionary<string, string[]>>(StringComparer.OrdinalIgnoreCase);
+                CoraxVectorChunkHighlighter.Apply(highlightingResult, _vectorChunkHighlightings, query, document, documentsContext, _index.DocumentDatabase);
+            }
+
             return new QueryResult
             {
                 Result = document,
-                Highlightings = highlightings.Execute(query, documentsContext, _fieldMappings, ref entryReader, highlightingFields, document, IndexSearcher),
+                Highlightings = highlightingResult,
             };
         }
 
@@ -1030,7 +1071,7 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
             Reference<long> skippedResults, Reference<long> scannedDocuments, IQueryResultRetriever retriever,
             DocumentsOperationContext documentsContext, Func<string, SpatialField> getSpatialField, QueryTimeScope queryTime, CancellationToken token)
         {
-            throw new NotImplementedException($"{nameof(Corax)} does not support intersect queries.");
+            throw new NotSupportedInCoraxException($"{nameof(Corax)} does not support intersect queries.");
         }
 
         public override List<string> Terms(string field, string fromValue, long pageSize, CancellationToken token)
@@ -1054,24 +1095,32 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax
             where TRetriever : IIndexedTermsRetriever
             where TResult : ICollection<string> 
         {
-            if (string.IsNullOrEmpty(fromValue) == false)
+            try
             {
-                Span<byte> fromValueBytes = StringToValue(fromValue);
-                while (retriever.GetNextTerm(out var currentTerm) && currentTerm.SequenceEqual(fromValueBytes) == false)
+                if (string.IsNullOrEmpty(fromValue) == false)
+                {
+                    Span<byte> fromValueBytes = StringToValue(fromValue);
+                    while (retriever.GetNextTerm(out var currentTerm) && currentTerm.SequenceEqual(fromValueBytes) == false)
+                    {
+                        token.ThrowIfCancellationRequested();
+                    }
+                }
+
+                while (pageSize > 0 && retriever.GetNextTerm(out var currentTerm))
                 {
                     token.ThrowIfCancellationRequested();
+                    results.Add(ValueToString(currentTerm));
+                    pageSize--;
                 }
-            }
 
-            while (pageSize > 0 && retriever.GetNextTerm(out var currentTerm))
+                return results;
+            }
+            finally
             {
-                token.ThrowIfCancellationRequested();
-                results.Add(ValueToString(currentTerm));
-                pageSize--;
+                // using snapshots a struct *before* key is acquired, must use finally
+                retriever.Dispose();
             }
 
-            return results;
-            
             string ValueToString(ReadOnlySpan<byte> bytes)
             {
                 return retriever.Type switch

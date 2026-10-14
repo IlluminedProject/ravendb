@@ -1,11 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
+using FastTests;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Documents.Operations.ETL;
 using Raven.Client.Util;
+using Raven.Server.Config;
 using Tests.Infrastructure.ConnectionString.AI;
 using Xunit;
 using Xunit.Sdk;
@@ -19,7 +21,7 @@ public enum RavenAiIntegration
     None = 0,
     OpenAi = 1 << 1,
     AzureOpenAI = 1 << 2,
-    Ollama = 1 << 3, // we keep ollama here only for connectivity check
+    Ollama = 1 << 3,
     Onnx = 1 << 4,
     Google = 1 << 5,
     HuggingFace = 1 << 6,
@@ -56,23 +58,33 @@ public abstract class AbstractRavenAiIntegrationDataAttribute<TConfig> : RavenDa
             {
                 using (ResetSkipReason(Skip))
                 {
-                    if (HasSkipReason(aiConnectionStringForTesting) == false)
+                    if (string.IsNullOrEmpty(Skip) && aiConnectionStringForTesting.AiConnectorType == AiConnectorType.Ollama)
+                    {
+                        Skip = "Local Ollama integration tests are currently disabled.";
+                    }
+                    else if (HasSkipReason(aiConnectionStringForTesting) == false)
                     {
                         if (aiConnectionStringForTesting.CanConnect.Value == false)
                         {
                             Skip = $"Test requires connection to {aiConnectionStringForTesting.AiConnectorType}.";
-                    }
-                    }
-
-                    var aiIntegrationConfiguration = aiConnectionStringForTesting.GetAiConfiguration();
-
-                    if (Data == null || Data.Length == 0)
-                    {
-                        result.Add(new TheoryDataRow(options, aiIntegrationConfiguration));
-                        continue;
+                        }
                     }
 
-                    result.Add(new TheoryDataRow(new object[] { options, aiIntegrationConfiguration }.Concat(Data).ToArray()));
+                    var skipReason = Skip;
+                    var aiIntegrationConfiguration = string.IsNullOrEmpty(skipReason)
+                        ? aiConnectionStringForTesting.GetAiConfiguration()
+                        : null;
+
+                    var effectiveOptions = ModifyOptionsForConnector(aiConnectionStringForTesting, options);
+
+                    var row = Data == null || Data.Length == 0
+                        ? new TheoryDataRow(effectiveOptions, aiIntegrationConfiguration)
+                        : new TheoryDataRow(new object[] { effectiveOptions, aiIntegrationConfiguration }.Concat(Data).ToArray());
+
+                    if (string.IsNullOrEmpty(skipReason) == false)
+                        row.Skip = skipReason;
+
+                    result.Add(row);
                 }
             }
         }
@@ -81,28 +93,30 @@ public abstract class AbstractRavenAiIntegrationDataAttribute<TConfig> : RavenDa
 
     private DisposableAction ResetSkipReason(string skip) => new(() => Skip = skip);
 
+    protected virtual RavenTestBase.Options ModifyOptionsForConnector(IAiConnectorForTesting<TConfig> connector, RavenTestBase.Options options) => options;
+
     private bool HasSkipReason(IAiConnectorForTesting<TConfig> aiConnectorForTesting)
     {
-        if (string.IsNullOrEmpty(Skip))
+        if (string.IsNullOrEmpty(Skip) == false)
             return true;
 
-        if (RavenTestHelper.SkipAiIntegrationTests)
+        if (RavenTestHelper.EnvironmentVariables.SkipAiIntegrationTests)
         {
             Skip = RavenTestHelper.SkipAiIntegrationMessage;
             return true;
-    }
+        }
 
         if (Is32Bit)
-    {
+        {
             Skip = "AI tests are skipped on 32-bit process";
             return true;
-    }
+        }
 
-        if (RavenTestHelper.IsRunningOnCI)
+        if (RavenTestHelper.EnvironmentVariables.IsRunningOnCI)
             return false;
 
         if (aiConnectorForTesting.MissingRequiredEnvVariables(out var envVar))
-    {
+        {
             Skip = $"The environment variable {envVar} is required for {aiConnectorForTesting.AiConnectorType}, but was not set.";
             return true;
         }
@@ -115,6 +129,17 @@ public abstract class AbstractRavenAiIntegrationDataAttribute<TConfig> : RavenDa
 
 public class RavenGenAiDataAttribute : AbstractRavenAiIntegrationDataAttribute<GenAiConfiguration>
 {
+    protected override RavenTestBase.Options ModifyOptionsForConnector(IAiConnectorForTesting<GenAiConfiguration> connector, RavenTestBase.Options options)
+    {
+        if (connector.AiConnectorType != AiConnectorType.Ollama)
+            return options;
+
+        // A local reasoning model needs more than the default 60s per completion.
+        options = options.Clone();
+        options.ModifyDatabaseRecord += record => record.Settings[RavenConfiguration.GetKey(x => x.Ai.GenAiSendToModelTimeout)] = "180";
+        return options;
+    }
+
     public static IEnumerable<IAiConnectorForTesting<GenAiConfiguration>> GetAiConnectionStrings(RavenAiIntegration aiIntegration)
     {
         if (aiIntegration.HasFlag(RavenAiIntegration.OpenAi))

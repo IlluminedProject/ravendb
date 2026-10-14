@@ -61,6 +61,7 @@ namespace Raven.Server.Documents.PeriodicBackup
         internal PeriodicBackupRunner.TestingStuff _forTestingPurposes;
         private readonly DateTime _startTimeUtc;
         protected Action OnBackupException;
+        protected void RegisterOnBackupException(Action handler) => OnBackupException += handler;
 
         public BackupTask(DocumentDatabase database, BackupParameters backupParameters, BackupConfiguration configuration, OperationCancelToken token, RavenLogger logger, PeriodicBackupRunner.TestingStuff forTestingPurposes = null)
         {
@@ -782,39 +783,77 @@ namespace Raven.Server.Documents.PeriodicBackup
             startDocumentEtag = startDocumentEtag == null ? 0 : ++startDocumentEtag;
             startRaftIndex = startRaftIndex == null ? 0 : ++startRaftIndex;
 
-            using (var uploader = GetUploaderForBackupDestination(backupFilePath, folderName, fileName))
-            using (var outputStream = GetOutputStream(uploader.Stream))
             using (Database.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
             using (Database.DocumentsStorage.ContextPool.AllocateOperationContext(out JsonOperationContext smugglerContext))
             {
                 try
                 {
-                    var smugglerSource = Database.Smuggler.CreateSource(startDocumentEtag.Value, startRaftIndex.Value, _logger);
-                    var smugglerDestination = new StreamDestination(outputStream, context, smugglerSource, Database.Configuration.Backup.CompressionAlgorithm.ToExportCompressionAlgorithm(), Database.Configuration.Backup.CompressionLevel);
-                    var smuggler = Database.Smuggler.Create(
-                        smugglerSource,
-                        smugglerDestination,
-                        smugglerContext,
-                        options: options,
-                        result: BackupResult,
-                        onProgress: _onProgress,
-                        token: TaskCancelToken.Token);
+                    currentBackupResults = AsyncHelpers.RunSyncWithSynchronization(async () =>
+                    {
+                        var uploader = GetUploaderForBackupDestination(backupFilePath, folderName, fileName);
+                        Stream outputStream = null;
 
-                    smuggler.ExecuteAsync().Wait();
+                        try
+                        {
+                            outputStream = GetOutputStream(uploader.Stream);
+                            var smugglerSource = Database.Smuggler.CreateSource(startDocumentEtag.Value, startRaftIndex.Value, _logger);
+                            var smugglerDestination = new StreamDestination(outputStream, context, smugglerSource, Database.Configuration.Backup.CompressionAlgorithm.ToExportCompressionAlgorithm(), Database.Configuration.Backup.CompressionLevel);
+                            var smuggler = Database.Smuggler.Create(
+                                smugglerSource,
+                                smugglerDestination,
+                                smugglerContext,
+                                options: options,
+                                result: BackupResult,
+                                onProgress: _onProgress,
+                                token: TaskCancelToken.Token);
 
-                    FlushToDisk(outputStream);
+                            var prevWriterCaptureContextOnAwait = AsyncBlittableJsonTextWriter.CaptureContextOnAwait.Value;
+                            AsyncBlittableJsonTextWriter.CaptureContextOnAwait.Value = true;
 
-                    currentBackupResults.LastEtag = smugglerSource.LastEtag;
-                    currentBackupResults.LastDatabaseChangeVector = smugglerSource.LastDatabaseChangeVector;
-                    currentBackupResults.LastRaftIndex = smugglerSource.LastRaftIndex;
+                            bool prevZstdCaptureContextOnAwait = false;
+                            if (options.CompressionAlgorithm == ExportCompressionAlgorithm.Zstd)
+                            {
+                                prevZstdCaptureContextOnAwait = ZstdStream.CaptureContextOnAwait.Value;
+                                ZstdStream.CaptureContextOnAwait.Value = true;
+                            }
 
-                    return currentBackupResults;
+                            try
+                            {
+                                await smuggler.ExecuteAsync();
+
+                                FlushToDisk(outputStream);
+                            }
+                            finally
+                            {
+                                AsyncBlittableJsonTextWriter.CaptureContextOnAwait.Value = prevWriterCaptureContextOnAwait;
+
+                                if (options.CompressionAlgorithm == ExportCompressionAlgorithm.Zstd)
+                                    ZstdStream.CaptureContextOnAwait.Value = prevZstdCaptureContextOnAwait;
+                            }
+
+                            currentBackupResults.LastEtag = smugglerSource.LastEtag;
+                            currentBackupResults.LastDatabaseChangeVector = smugglerSource.LastDatabaseChangeVector;
+                            currentBackupResults.LastRaftIndex = smugglerSource.LastRaftIndex;
+
+                            return currentBackupResults;
+                        }
+                        catch
+                        {
+                            OnBackupException?.Invoke();
+                            throw;
+                        }
+                        finally
+                        {
+                            await (outputStream ?? uploader.Stream).DisposeAsync();
+                        }
+                    });
                 }
-                catch
+                catch (TimeoutException e) when (TaskCancelToken.Token.IsCancellationRequested)
                 {
-                    OnBackupException?.Invoke();
-                    throw;
+                    throw new OperationCanceledException("Backup was canceled.", e);
                 }
+
+                return currentBackupResults;
             }
         }
 

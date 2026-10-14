@@ -3,9 +3,15 @@ import intermediateMenuItem = require("common/shell/menu/intermediateMenuItem");
 import leafMenuItem = require("common/shell/menu/leafMenuItem");
 import BackupsPage = require("components/pages/database/tasks/backups/BackupsPage");
 import CreateSampleData = require("components/pages/database/tasks/createSampleData/CreateSampleData");
+import EditCdcSinkTask = require("components/pages/database/tasks/ongoingTasks/editTasks/editCdcSinkTask/EditCdcSinkTask");
 import EditGenAiTask = require("components/pages/database/tasks/ongoingTasks/editTasks/editGenAiTask/EditGenAiTask");
+import ImportDataOptions = require("components/pages/database/tasks/importData/ImportDataOptions");
+import ImportDatabaseFromFile = require("components/pages/database/tasks/importData/importFromFile/ImportDatabaseFromFile");
 import OngoingTasksPage = require("components/pages/database/tasks/ongoingTasks/OngoingTasksPage");
 import AddNewOngoingTask = require("components/pages/database/tasks/ongoingTasks/AddNewOngoingTask");
+import separatorMenuItem = require("common/shell/menu/separatorMenuItem");
+import TasksErrorsPage = require("components/pages/database/tasks/tasksErrors/TasksErrorsPage");
+import footer = require("common/shell/footer")
 
 export = getTasksMenuItem;
 
@@ -79,28 +85,44 @@ function getTasksMenuItem(appUrls: computedAppUrls) {
             title: 'Add new ongoing task',
             nav: false,
             css: "icon-plus",
-            dynamicHash: appUrls.addNewOngoingTask(false),
+            dynamicHash: appUrls.addNewOngoingTaskUrl(false),
             itemRouteToHighlight: 'databases/tasks/addNewOngoingTasks',
+        }),
+        new leafMenuItem({
+            route: 'databases/tasks/importOptions',
+            moduleId: reactUtils.bridgeToReact(ImportDataOptions.default, "nonShardedView"),
+            shardingMode: "allShards",
+            title: 'Import Data',
+            nav: true,
+            css: 'icon-import-database',
+            dynamicHash: appUrls.importDataOptionsUrl,
+            requiredAccess: "DatabaseReadWrite",
+        }),
+        new leafMenuItem({
+            route: 'databases/tasks/import/file',
+            moduleId: reactUtils.bridgeToReact(ImportDatabaseFromFile.default, "nonShardedView"),
+            shardingMode: "allShards",
+            title: 'Import Data',
+            nav: false,
+            css: 'icon-import-database',
+            dynamicHash: appUrls.importDatabaseFromFileUrl,
+            itemRouteToHighlight: 'databases/tasks/importOptions',
+            requiredAccess: "DatabaseReadWrite",
+            search: {
+                overrideTitle: "Import Database From File",
+            },
         }),
         new leafMenuItem({
             route: 'databases/tasks/import*details',
             moduleId: require('viewmodels/database/tasks/importParent'),
             title: 'Import Data',
-            nav: true,
-            css: 'icon-import-database',
-            dynamicHash: appUrls.importDatabaseFromFileUrl,
-            requiredAccess: "DatabaseReadWrite",
-        }),
-        new leafMenuItem({
-            route: 'databases/tasks/import/file',
-            moduleId: require('viewmodels/database/tasks/importDatabaseFromFile'),
-            title: 'Import Data',
             nav: false,
             css: 'icon-import-database',
             dynamicHash: appUrls.importDatabaseFromFileUrl,
-            itemRouteToHighlight: 'databases/tasks/import*details',
+            itemRouteToHighlight: 'databases/tasks/importOptions',
+            requiredAccess: "DatabaseReadWrite",
             search: {
-                overrideTitle: "Import Database From File",
+                isExcluded: true,
             },
         }),
         new leafMenuItem({
@@ -110,7 +132,7 @@ function getTasksMenuItem(appUrls: computedAppUrls) {
             nav: false,
             css: 'icon-import-database',
             dynamicHash: appUrls.migrateRavenDbDatabaseUrl,
-            itemRouteToHighlight: 'databases/tasks/import*details',
+            itemRouteToHighlight: 'databases/tasks/importOptions',
             search: {
                 overrideTitle: "Import Database From RavenDB Server",
             },
@@ -122,7 +144,7 @@ function getTasksMenuItem(appUrls: computedAppUrls) {
             nav: false,
             css: 'icon-import-database',
             dynamicHash: appUrls.importCollectionFromCsv,
-            itemRouteToHighlight: 'databases/tasks/import*details',
+            itemRouteToHighlight: 'databases/tasks/importOptions',
             search: {
                 overrideTitle: "Import documents from a CSV",
             },
@@ -134,7 +156,7 @@ function getTasksMenuItem(appUrls: computedAppUrls) {
             nav: false,
             css: 'icon-import-database',
             dynamicHash: appUrls.importDatabaseFromSql,
-            itemRouteToHighlight: 'databases/tasks/import*details',
+            itemRouteToHighlight: 'databases/tasks/importOptions',
             search: {
                 overrideTitle: "Import documents from a SQL",
             },
@@ -144,9 +166,9 @@ function getTasksMenuItem(appUrls: computedAppUrls) {
             moduleId: require('viewmodels/database/tasks/migrateDatabase'),
             title: 'Import Data',
             nav: false,
-            css: 'icon-export-database',
-            dynamicHash: appUrls.exportDatabaseUrl,
-            itemRouteToHighlight: 'databases/tasks/export*details',
+            css: 'icon-import-database',
+            dynamicHash: appUrls.migrateDatabaseUrl,
+            itemRouteToHighlight: 'databases/tasks/importOptions',
             search: {
                 overrideTitle: "Migrate data from another database",
             },
@@ -399,6 +421,46 @@ function getTasksMenuItem(appUrls: computedAppUrls) {
             search: {
                 overrideTitle: "Add New RabbitMQ Sink Task",
                 alternativeTitles: ["Create RabbitMQ Sink Task"],
+            }
+        }),
+        new leafMenuItem({
+            route: 'databases/tasks/editAzureServiceBusSinkTask',
+            moduleId: require('viewmodels/database/tasks/editAzureServiceBusSinkTask'),
+            title: 'Azure Service Bus Sink Task',
+            nav: false,
+            css: "icon-plus",
+            dynamicHash: appUrls.editAzureServiceBusSinkTaskUrl,
+            itemRouteToHighlight: 'databases/tasks/ongoingTasks',
+            search: {
+                overrideTitle: "Add New Azure Service Bus Sink Task",
+                alternativeTitles: ["Create Azure Service Bus Sink Task"],
+            }
+        }),
+        new separatorMenuItem(),
+        new leafMenuItem({
+            route: 'databases/tasks/tasksErrors',
+            moduleId: reactUtils.bridgeToReact(TasksErrorsPage.default, "nonShardedView"),
+            shardingMode: "allShards",
+            title: 'Task Errors',
+            nav: true,
+            css: 'icon-tasks-errors',
+            dynamicHash: appUrls.tasksError,
+            requiredAccess: "DatabaseReadWrite",
+            badgeData: ko.pureComputed(() => { 
+                return footer.default.stats() ? footer.default.stats().countOfEtlTasksErrors() + footer.default.stats().countOfAiTasksErrors() + footer.default.stats().countOfCdcSinkTasksErrors() : null;
+            })
+        }),
+        new leafMenuItem({
+            route: 'databases/tasks/editCdcSinkTask',
+            moduleId: reactUtils.bridgeToReact(EditCdcSinkTask.default, "nonShardedView"),
+            title: 'CDC Sink Task',
+            nav: false,
+            css: "icon-plus",
+            dynamicHash: appUrls.editCdcSinkTaskUrl,
+            itemRouteToHighlight: 'databases/tasks/ongoingTasks',
+            search: {
+                overrideTitle: "Add New CDC Sink Task",
+                alternativeTitles: ["Create CDC Sink Task"],
             }
         }),
     ];

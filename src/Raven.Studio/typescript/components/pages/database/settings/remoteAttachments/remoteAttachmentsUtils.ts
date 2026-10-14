@@ -8,6 +8,7 @@ import {
 import {
     defaultAzureFormData,
     defaultS3FormData,
+    mapAzureAuthTypeFromDto,
 } from "components/common/formDestinations/utils/formDestinationsMapsFromDto";
 import { mapAmazonToDto, mapAzureToDto } from "components/common/formDestinations/utils/formDestinationsMapsToDto";
 import IconName from "../../../../../../typings/server/icons";
@@ -76,6 +77,7 @@ function mapFromDto(dto: RemoteAttachmentsConfiguration): RemoteAttachmentsFormD
                         isUseCustomHost: s3Config.CustomServerUrl != null,
                         customServerUrl: s3Config.CustomServerUrl,
                         forcePathStyle: s3Config.ForcePathStyle,
+                        disableChecksumValidation: s3Config.DisableChecksumValidation,
                         storageClass: s3Config.StorageClass,
                     },
                     azure: null,
@@ -89,7 +91,9 @@ function mapFromDto(dto: RemoteAttachmentsConfiguration): RemoteAttachmentsFormD
                     azure: {
                         ...defaultAzureFormData,
                         accountName: azureConfig.AccountName,
+                        authType: mapAzureAuthTypeFromDto(azureConfig),
                         accountKey: azureConfig.AccountKey,
+                        sasToken: azureConfig.SasToken,
                         storageContainer: azureConfig.StorageContainer,
                         remoteFolderName: azureConfig.RemoteFolderName,
                     },
@@ -146,10 +150,16 @@ const mapS3ToDto = (
     const forcePathStyle =
         !destination.config.isOverrideConfig && destination.isUseCustomHost ? destination.forcePathStyle : undefined;
 
+    const disableChecksumValidation =
+        !destination.config.isOverrideConfig && destination.isUseCustomHost
+            ? destination.disableChecksumValidation
+            : undefined;
+
     return {
         ...mapAmazonToDto(destination),
         CustomServerUrl: customServerUrl,
         ForcePathStyle: forcePathStyle,
+        DisableChecksumValidation: disableChecksumValidation,
         BucketName: destination.bucketName,
         StorageClass: destination.storageClass,
     };

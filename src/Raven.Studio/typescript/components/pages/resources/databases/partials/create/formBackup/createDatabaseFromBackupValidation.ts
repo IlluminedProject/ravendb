@@ -3,6 +3,7 @@ import {
     dataDirectoryStepSchema,
     databaseNameSchema,
 } from "components/pages/resources/databases/partials/create/shared/createDatabaseSharedValidation";
+import { AzureAuthType } from "components/common/formDestinations/utils/formDestinationsTypes";
 import * as yup from "yup";
 
 const basicInfoStepSchema = yup.object({
@@ -95,6 +96,7 @@ const ravenCloudSource = yup.object({
 const amazonS3Source = yup.object({
     isUseCustomHost: yup.boolean(),
     isForcePathStyle: yup.boolean(),
+    isDisableChecksumValidation: yup.boolean(),
     customHost: yup.string().when(["isUseCustomHost", "$sourceType"], {
         is: (isUseCustomHost: boolean, sourceType: RestoreSource) => isUseCustomHost && sourceType === "amazonS3",
         then: (schema) => schema.trim().strict().required(),
@@ -121,15 +123,22 @@ const amazonS3Source = yup.object({
     encryptionKey: getEncryptionKeySchema("amazonS3"),
 });
 
+function getAzureCredentialSchema(authType: AzureAuthType) {
+    return yup.string().when(["authType", "$sourceType"], {
+        is: (selectedAuthType: AzureAuthType, sourceType: RestoreSource) =>
+            sourceType === "azure" && selectedAuthType === authType,
+        then: (schema) => schema.trim().strict().required(),
+    });
+}
+
 const azureSource = yup.object({
     accountName: yup.string().when("$sourceType", {
         is: "azure",
         then: (schema) => schema.trim().strict().required(),
     }),
-    accountKey: yup.string().when("$sourceType", {
-        is: "azure",
-        then: (schema) => schema.trim().strict().required(),
-    }),
+    authType: yup.string<AzureAuthType>(),
+    accountKey: getAzureCredentialSchema("accountKey"),
+    sasToken: getAzureCredentialSchema("sasToken"),
     container: yup.string().when("$sourceType", {
         is: "azure",
         then: (schema) => schema.trim().strict().required(),

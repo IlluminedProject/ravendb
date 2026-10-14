@@ -1,6 +1,7 @@
 import { CreateDatabaseFromBackupDto } from "commands/resources/restoreDatabaseFromBackupCommand";
 import { CreateDatabaseFromBackupFormData as FormData, RestoreSource } from "./createDatabaseFromBackupValidation";
 import assertUnreachable from "components/utils/assertUnreachable";
+import { mapAzureCredentialsToDto } from "components/common/formDestinations/utils/formDestinationsMapsToDto";
 type S3Settings = Raven.Client.Documents.Operations.Backups.S3Settings;
 type AzureSettings = Raven.Client.Documents.Operations.Backups.AzureSettings;
 type GoogleCloudSettings = Raven.Client.Documents.Operations.Backups.GoogleCloudSettings;
@@ -39,6 +40,7 @@ const defaultValues: FormData = {
             amazonS3: {
                 isUseCustomHost: false,
                 isForcePathStyle: false,
+                isDisableChecksumValidation: false,
                 customHost: "",
                 accessKey: "",
                 secretKey: "",
@@ -49,7 +51,9 @@ const defaultValues: FormData = {
                 pointsWithTags: defaultPointsWithTags,
             },
             azure: {
+                authType: "accountKey",
                 accountKey: "",
+                sasToken: "",
                 accountName: "",
                 container: "",
                 remoteFolderName: "",
@@ -220,6 +224,7 @@ function getSourceDto(
                     Disabled: false,
                     CustomServerUrl: null,
                     ForcePathStyle: false,
+                    DisableChecksumValidation: false,
                     GetBackupConfigurationScript: null,
                 } satisfies S3Settings,
             };
@@ -240,6 +245,7 @@ function getSourceDto(
                     GetBackupConfigurationScript: null,
                     CustomServerUrl: data.isUseCustomHost ? data.customHost : null,
                     ForcePathStyle: data.isUseCustomHost && data.isForcePathStyle,
+                    DisableChecksumValidation: data.isUseCustomHost && data.isDisableChecksumValidation,
                 } satisfies S3Settings,
             };
         }
@@ -249,8 +255,7 @@ function getSourceDto(
             return {
                 ...getSelectedSourceDto(isSharded, data, sourceStepIsEncrypted, encryptionStepKey),
                 Settings: {
-                    AccountKey: data.accountKey,
-                    SasToken: "",
+                    ...mapAzureCredentialsToDto(data),
                     AccountName: data.accountName,
                     StorageContainer: data.container,
                     RemoteFolderName: backupLocation,

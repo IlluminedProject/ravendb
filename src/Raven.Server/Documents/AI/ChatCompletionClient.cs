@@ -5,6 +5,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.ServerSentEvents;
@@ -17,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.IdentityModel.Tokens;
+using Raven.Client.Documents.AI;
 using Raven.Client.Documents.Conventions;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Documents.Operations.AI.Agents;
@@ -30,6 +32,7 @@ using Raven.Server.Documents.SchemaValidation.ErrorMessage;
 using Raven.Server.Json;
 using Raven.Server.Utils;
 using Sparrow;
+using Sparrow.Exceptions;
 using Sparrow.Json;
 using Sparrow.Json.Parsing;
 using Sparrow.Server.Json.Sync;
@@ -161,19 +164,23 @@ public class ChatCompletionClient : IDisposable
     public async Task<AiResponse> StreamingCompleteAsync(JsonOperationContext streamingContext, IMemoryContextPool contextPool,
         string streamPropertyPath, HttpRequestMessage request,
         Func<Memory<byte>, Task> streamedPropertyCallback,
-        AiUsage usage, CancellationToken token)
+        AiUsage usage, string schema, AiDebugTrace trace, CancellationToken token)
     {
         AddDefaultHeaders(request);
         using var streamedPropertyBuffer = new JsonOperationContextBuffer<byte>(streamingContext);
 
-        var parser = new SseStreamingJsonParser(streamingContext, streamPropertyPath);
+        bool structuredOutput = schema != null;
         var alreadySeen = 0;
-        parser.OnStringRead += (e) =>
+
+        using var parser = structuredOutput ? new SseStreamingJsonParser(streamingContext, streamPropertyPath) : null;
+        if (parser != null)
         {
             // the `e` we get here is the _full_ string (including past chunks we already saw)
-            // we want to read only the *new* parts, that we didn't see before
-            alreadySeen += streamedPropertyBuffer.Append(alreadySeen, e);
-        };
+            parser.OnStringRead += (e) =>
+            {
+                alreadySeen += streamedPropertyBuffer.Append(alreadySeen, e);
+            };
+        }
 
         using var response = await SendStreamingRequestAsync(request, token);
         if (response.IsSuccessStatusCode == false)
@@ -185,7 +192,7 @@ public class ChatCompletionClient : IDisposable
 
         await using var responseStream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
         IToolCallState toolCallState = _settings.CreateToolCallState();
-        BlittableJsonReaderObject message = null;
+        var result = new AiResultBuilder(parser);
 
         // need two contexts here because we run two parsing operations at once, first for each of the SSE events
         // and then for the internal buffer that there are providing.
@@ -213,6 +220,8 @@ public class ChatCompletionClient : IDisposable
                 break;
             }
 
+            trace?.CaptureSseEvent(streamingContext, sseEvent.Data);
+
             if (sseEvent.Data.TryGet(Constants.ResponseFields.Usage, out BlittableJsonReaderObject streamedUsage) && streamedUsage is not null)
             {
                 usage.UpdateFrom(streamedUsage);
@@ -225,26 +234,28 @@ public class ChatCompletionClient : IDisposable
             }
 
             var choice = (BlittableJsonReaderObject)choices[0];
-            if (choice.TryGet(Constants.ResponseFields.Delta, out BlittableJsonReaderObject delta))
+            result.RecordFinishReason(_settings.GetFinishReason(choice));
+
+            // Probe the refusal on every choice, not only on chunks that carry a delta: Azure and Google signal it on
+            // the choice itself (finish_reason / content_filter_results), possibly on a terminal chunk with no delta.
+            var hasDelta = choice.TryGet(Constants.ResponseFields.Delta, out BlittableJsonReaderObject delta);
+            var refusalDelta = _settings.GetRefusal(choice, delta, streaming: true, out var refusalIsComplete);
+            if (string.IsNullOrEmpty(refusalDelta) == false)
+                result.RecordRefusal(refusalDelta, refusalIsComplete);
+
+            if (hasDelta)
             {
-                if (TryGetDeltaContent(delta, out LazyStringValue content))
+                if (delta.TryGet(Constants.ResponseFields.Content, out LazyStringValue content) && content?.Length > 0)
                 {
                     toolCallState.AddAndReset();
 
-                    var final = parser.Process(content);
-                    if (streamedPropertyBuffer.Length is not 0) // Length is the written data length (not the buffer real size)
-                    {
-                        // here we send all the data that wasn't sent so far to the client
-                        await streamedPropertyCallback(streamedPropertyBuffer.AsMemory());
-                        // reset the buffer length so we can overwrite the start of the buffer
-                        // and only retain in memory the parts we'll need to send next time
-                        streamedPropertyBuffer.Length = 0;
-                    }
-
-                    if (final is not null)
-                    {
-                        message = final;
-                    }
+                    if (result.AcceptContent(content))
+                        await StreamContentAsync(content);
+                }
+                else if (TryGetDeltaReasoning(delta, out LazyStringValue reasoning))
+                {
+                    toolCallState.AddAndReset();
+                    result.AcceptReasoning(reasoning);
                 }
 
                 if (delta.TryGet(Constants.ResponseFields.ToolCalls, out BlittableJsonReaderArray toolCalls))
@@ -258,7 +269,13 @@ public class ChatCompletionClient : IDisposable
         }
 
         // Some OpenAI-like APIs return an empty array instead of omitting the field when no tool calls are made
-        if (toolCallState.TryGetToolCallsForMessage(out var allToolCalls))
+        var hasToolCalls = toolCallState.TryGetToolCallsForMessage(out var allToolCalls);
+
+        // Refusal first, then a token-limit cut, and both before returning tool calls: a filtered or cut stream can
+        // carry partial tool-call deltas that must not reach the agent loop.
+        result.ThrowIfRefusedOrTruncated(response, hasToolCalls);
+
+        if (hasToolCalls)
         {
             return new AiResponse(AiResponseType.Tool)
             {
@@ -272,15 +289,183 @@ public class ChatCompletionClient : IDisposable
             };
         }
 
+        result.FinalizeOrThrow(streamingContext, response);
+
+        if (result.TryGetChunk(out var chunk))
+            await StreamContentAsync(streamingContext.GetLazyString(chunk));
+
+        var finalResult = result.GetResult();
         return new AiResponse(AiResponseType.Result)
         {
             Message = streamingContext.ReadObject(new DynamicJsonValue
             {
                 [Constants.ResponseFields.Role] = Constants.RequestFields.RoleAssistantValue,
-                [Constants.ResponseFields.Content] = message,
+                [Constants.ResponseFields.Content] = finalResult,
             }, "persisted/streamed/message"),
-            Result = message,
+            Result = finalResult,
         };
+
+        async Task StreamContentAsync(LazyStringValue content)
+        {
+            if (structuredOutput == false)
+                streamedPropertyBuffer.Append(content.AsSpan());
+
+            await FlushStreamedPropertyAsync();
+        }
+
+        async Task FlushStreamedPropertyAsync()
+        {
+            if (streamedPropertyBuffer.Length is not 0) // Length is the written data length (not the buffer real size)
+            {
+                await streamedPropertyCallback(streamedPropertyBuffer.AsMemory());
+                streamedPropertyBuffer.Length = 0;
+            }
+        }
+    }
+
+    private sealed class AiResultBuilder
+    {
+        private readonly SseStreamingJsonParser _parser;
+        private readonly StringBuilder _text;
+        private string _pendingChunk;
+        private StringBuilder _reasoningFallback;
+        private BlittableJsonReaderObject _message;
+        private string _finishReason;
+        private bool _sawContent;
+        private StringBuilder _refusal;
+
+        public AiResultBuilder(SseStreamingJsonParser parser)
+        {
+            _parser = parser;
+            _text = parser == null ? new StringBuilder() : null;
+        }
+
+        public void RecordFinishReason(string finishReason)
+        {
+            if (finishReason != null)
+                _finishReason = finishReason;
+        }
+
+        // OpenAI streams the refusal as text fragments to concatenate; Azure and Google derive a full message per chunk
+        // that may repeat and must be kept once. The text is kept apart from the answer so it is neither parsed as
+        // JSON nor returned as content.
+        public void RecordRefusal(string refusal, bool isCompleteMessage)
+        {
+            if (isCompleteMessage)
+                _refusal ??= new StringBuilder(refusal);
+            else
+                (_refusal ??= new StringBuilder()).Append(refusal);
+        }
+
+        // Runs before tool calls are returned. Partial plain text is still an answer; a cut structured object or a cut
+        // tool call is not.
+        public void ThrowIfRefusedOrTruncated(HttpResponseMessage response, bool hasToolCalls)
+        {
+            if (_refusal is { Length: > 0 })
+                RefusedToAnswerException.Throw(_refusal.ToString(), "[streaming]", _finishReason, GetRequestId(response.Headers));
+
+            if ((_parser != null || hasToolCalls) &&
+                string.Equals(_finishReason, Constants.ResponseFields.FinishReasonLength, StringComparison.OrdinalIgnoreCase))
+            {
+                var what = hasToolCalls ? "tool call" : "structured answer";
+                throw new TooManyTokensException(
+                    $"The model response was truncated (finish_reason='length') before producing a complete {what}.{GetReasoningPreview()}")
+                {
+                    RequestId = GetRequestId(response.Headers)
+                };
+            }
+        }
+
+        public bool AcceptContent(LazyStringValue content)
+        {
+            _sawContent = true;
+            _reasoningFallback = null;
+
+            if (_parser == null)
+            {
+                _text.Append(content);
+                return true;
+            }
+
+            if (_parser.TryProcess(content, out var final) == false)
+                return false;
+
+            if (final != null)
+                _message = final;
+
+            return true;
+        }
+
+        public void AcceptReasoning(LazyStringValue reasoning)
+        {
+            if (_sawContent == false)
+                (_reasoningFallback ??= new StringBuilder()).Append(reasoning);
+        }
+
+        public void FinalizeOrThrow(JsonOperationContext context, HttpResponseMessage response)
+        {
+            if (_parser == null)
+            {
+                TryPromoteReasoningFallback(out _pendingChunk);
+                return;
+            }
+
+            if (_message == null && _sawContent == false && _reasoningFallback is { Length: > 0 })
+            {
+                if (_parser.TryProcess(context.GetLazyString(_reasoningFallback.ToString()), out var final) && final != null)
+                {
+                    _message = final;
+                    _pendingChunk = string.Empty;
+                }
+            }
+
+            if (_message == null)
+            {
+                var problem = _sawContent
+                    ? _parser.IsInvalid
+                        ? "streamed content that is not valid JSON"
+                        : "streamed content that did not form a complete JSON object"
+                    : _reasoningFallback is { Length: > 0 }
+                        ? "streamed no content, and its reasoning is not the structured answer"
+                        : "streamed no content";
+                throw UnexpectedResponseException.Create(
+                    $"Structured output was requested but the model {problem} (finish_reason='{_finishReason}').{GetReasoningPreview()}",
+                    response, content: (string)null);
+            }
+        }
+
+        public bool TryGetChunk(out string chunk)
+        {
+            chunk = _pendingChunk;
+            return chunk != null;
+        }
+
+        public object GetResult() => _parser == null ? _text.ToString() : _message;
+
+        private bool TryPromoteReasoningFallback(out string reasoning)
+        {
+            if (_sawContent || _reasoningFallback is not { Length: > 0 })
+            {
+                reasoning = null;
+                return false;
+            }
+
+            reasoning = _reasoningFallback.ToString();
+            _text.Append(reasoning);
+            _reasoningFallback = null;
+            return true;
+        }
+
+        private string GetReasoningPreview()
+        {
+            if (_reasoningFallback is not { Length: > 0 })
+                return string.Empty;
+
+            const int maxLength = 500;
+            return _reasoningFallback.Length <= maxLength
+                ? $" Reasoning: {_reasoningFallback}"
+                : $" Reasoning: {_reasoningFallback.ToString(0, maxLength)}...";
+        }
     }
 
     private static bool TryGetDeltaContent(BlittableJsonReaderObject delta, out LazyStringValue content)
@@ -289,13 +474,29 @@ public class ChatCompletionClient : IDisposable
         if (delta.TryGet(Constants.ResponseFields.Content, out content) && content?.Length > 0)
             return true;
 
-        if (delta.TryGet(Constants.ResponseFields.ReasoningContent, out content) && content?.Length > 0)
+        return TryGetDeltaReasoning(delta, out content);
+    }
+
+    // Whether the message carries something to return. Providers whose refusal detection is a heuristic over the
+    // shape of the message (Google) use this so GetRefusal stays safe to call on any response.
+    internal static bool HasContentOrToolCalls(BlittableJsonReaderObject message)
+    {
+        if (message == null)
+            return false;
+
+        return TryGetDeltaContent(message, out _)
+               || (message.TryGet(Constants.ResponseFields.ToolCalls, out BlittableJsonReaderArray calls) && calls is { Length: > 0 });
+    }
+
+    private static bool TryGetDeltaReasoning(BlittableJsonReaderObject delta, out LazyStringValue reasoning)
+    {
+        if (delta.TryGet(Constants.ResponseFields.ReasoningContent, out reasoning) && reasoning?.Length > 0)
             return true;
 
-        if (delta.TryGet(Constants.ResponseFields.Reasoning, out content) && content?.Length > 0)
+        if (delta.TryGet(Constants.ResponseFields.Reasoning, out reasoning) && reasoning?.Length > 0)
             return true;
 
-        content = null;
+        reasoning = null;
         return false;
     }
 
@@ -315,15 +516,80 @@ public class ChatCompletionClient : IDisposable
         }, "system/msg");
 
         var request = CreateCompletionRequest(context, [prompt, user], attachments: null, tools: null, useTools: false, streaming: false, schema);
-        var r = await CompleteAsync(context, request, new AiUsage(), token);
+        var r = await CompleteAsync(context, request, new AiUsage(), schema, trace: null, token);
         return (r.Result.ToString(), r.Message.ToString());
     }
 
-    public async Task<AiResponse> CompleteAsync(JsonOperationContext context, HttpRequestMessage request, AiUsage usage, CancellationToken token)
+    public async Task<bool> TestSupportsToolsAsync(CancellationToken token)
+    {
+        try
+        {
+            using var _ = _contextPool.AllocateOperationContext(out JsonOperationContext context);
+
+            var userMessage = context.ReadObject(new DynamicJsonValue
+            {
+                [Constants.RequestFields.Role] = Constants.RequestFields.RoleUserValue,
+                [Constants.RequestFields.Content] = "hi"
+            }, "probe/user");
+
+            var paramsSchema = GetSchemaForTool(schema: null, sampleObject: "{\"reason\":\"why the tool is being called\"}");
+            var tool = GetTool(context, "connection_test_probe", "A probe so the request matches an agent call. Do not call it.", paramsSchema);
+
+            var request = CreateCompletionRequest(context, messages: [userMessage], attachments: null, tools: [context.ReadObject(tool, "probe/tool")], useTools: true, streaming: false, schema: null);
+            await EnsureRequestAcceptedAsync(context, request, token);
+            return true;
+        }
+        catch (UnsuccessfulAiRequestException e) when (e.StatusCode == HttpStatusCode.BadRequest)
+        {
+            return false;
+        }
+    }
+
+    private const string AcceptsImageInputProbePngBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    public async Task<bool> TestAcceptsImageInputAsync(CancellationToken token)
+    {
+        try
+        {
+            using var _ = _contextPool.AllocateOperationContext(out JsonOperationContext context);
+
+            var attachment = new AiAttachment("probe.png", Constants.AttachmentsRequestFields.MediaTypeImagePng, AiAttachmentSource.FromAttachment, AcceptsImageInputProbePngBase64);
+
+            var userMessage = context.ReadObject(new DynamicJsonValue
+            {
+                [Constants.RequestFields.Role] = Constants.RequestFields.RoleUserValue,
+                [Constants.RequestFields.Content] = "describe the image"
+            }, "probe/user");
+
+            var request = CreateCompletionRequest(context, messages: [userMessage], attachments: [attachment], tools: null, useTools: false, streaming: false, schema: null);
+            await EnsureRequestAcceptedAsync(context, request, token);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+    
+    private async Task EnsureRequestAcceptedAsync(JsonOperationContext context, HttpRequestMessage request, CancellationToken token)
+    {
+        AddDefaultHeaders(request);
+        using var response = await SendRequestAsync(request, token);
+        if (response.IsSuccessStatusCode)
+            return;
+
+        var responseContent = await GetResponseContentAsync(context, response, token);
+        HandleUnsuccessfulResponse(response, responseContent);
+    }
+
+    public async Task<AiResponse> CompleteAsync(JsonOperationContext context, HttpRequestMessage request, AiUsage usage, string schema, AiDebugTrace trace, CancellationToken token)
     {
         AddDefaultHeaders(request);
         using var response = await SendRequestAsync(request, token);
         var responseContent = await GetResponseContentAsync(context, response, token);
+
+        trace?.CaptureResponse(responseContent);
 
         var responseParser = new AiResponseParser(this, response, responseContent);
         responseParser.EnsureSuccessfulResponse();
@@ -333,7 +599,7 @@ public class ChatCompletionClient : IDisposable
             return new AiResponse(AiResponseType.Tool) { ToolCalls = tools, Message = responseParser.Message };
         }
 
-        var result = responseParser.GetContent(context);
+        var result = responseParser.GetContent(context, schema != null);
 
         return new AiResponse(AiResponseType.Result) { Result = result, Message = responseParser.Message };
     }
@@ -342,6 +608,8 @@ public class ChatCompletionClient : IDisposable
     {
         public BlittableJsonReaderObject Message;
         private BlittableJsonReaderObject _choice0;
+        private string _finishReason;
+        private bool _lengthTruncated;
 
         public void EnsureSuccessfulResponse()
         {
@@ -361,14 +629,35 @@ public class ChatCompletionClient : IDisposable
 
             _choice0 = (BlittableJsonReaderObject)choices[0];
 
-            if (_choice0.TryGet(Constants.ResponseFields.Message, out Message) == false)
+            // Some providers (e.g. Gemini's OpenAI-compatible API) omit "message" entirely and carry the refusal
+            // (e.g. finish_reason "content_filter: PROHIBITED_CONTENT") or the finish_reason on the bare choice,
+            // so Message can legitimately be null at this point.
+            _choice0.TryGet(Constants.ResponseFields.Message, out Message);
+
+            // A refusal or a token-limit stop still reports the tokens it consumed - account for them before throwing.
+            var hasUsage = responseContent.TryGet(Constants.ResponseFields.Usage, out BlittableJsonReaderObject usageJson);
+            if (hasUsage)
+                usage.UpdateFrom(usageJson);
+
+            // Same order as the streaming path: refusal, then length, then tool calls / content.
+            _finishReason = client.GetFinishReason(_choice0);
+            _lengthTruncated = string.Equals(_finishReason, Constants.ResponseFields.FinishReasonLength, StringComparison.OrdinalIgnoreCase);
+
+            var refusal = client.GetRefusal(_choice0, Message);
+            if (string.IsNullOrEmpty(refusal) == false)
+                RefusedToAnswerException.Throw(refusal, responseContent.ToString(), _finishReason, GetRequestId(response.Headers));
+
+            if (Message == null)
             {
+                // A token-limit stop that produced no message at all is still a cut, not a malformed response.
+                if (_lengthTruncated)
+                    throw Truncated();
+
                 throw UnexpectedResponseException.Create(message: "No message property in choice", response, responseContent);
             }
 
-            if (responseContent.TryGet(Constants.ResponseFields.Usage, out BlittableJsonReaderObject usageJson) == false)
+            if (hasUsage == false)
                 throw UnexpectedResponseException.Create(message: "No usage in response content", response, responseContent);
-            usage.UpdateFrom(usageJson);
         }
 
         public bool TryParseToolCalls(out List<AiToolCall> toolCalls)
@@ -378,6 +667,10 @@ public class ChatCompletionClient : IDisposable
                 toolCalls = null;
                 return false;
             }
+
+            // A token-limit cut inside the tool call (even a partial call) must not reach the agent loop.
+            if (_lengthTruncated)
+                throw Truncated();
 
             toolCalls = [];
             foreach (BlittableJsonReaderObject call in calls)
@@ -393,26 +686,74 @@ public class ChatCompletionClient : IDisposable
             return true;
         }
 
-        public BlittableJsonReaderObject GetContent(JsonOperationContext context)
+        public object GetContent(JsonOperationContext context, bool structuredOutput)
         {
-            // Try content, then reasoning_content, then reasoning (for LM Studio and other OpenAI-like APIs that still use the older mechanism)
-            if (TryGetDeltaContent(Message, out var content) == false)
-            {
-                _choice0.TryGet(Constants.ResponseFields.FinishReason, out string finishReason);
-                var refusal = client.GetRefusal(_choice0, Message);
-                if (string.IsNullOrEmpty(refusal))
-                    throw UnexpectedResponseException.Create(message: "No response content", response, responseContent);
+            _choice0.TryGet(Constants.ResponseFields.FinishReason, out string finishReason);
+            var lengthTruncated = string.Equals(finishReason, Constants.ResponseFields.FinishReasonLength, StringComparison.OrdinalIgnoreCase);
 
-                RefusedToAnswerException.Throw(refusal, responseContent.ToString(), finishReason, GetRequestId(response.Headers));
-            }
+            var hasContent = Message.TryGet(Constants.ResponseFields.Content, out LazyStringValue content) && content?.Length > 0;
 
-            var result = context.Sync.ReadForMemory(content, "ai/output");
+            var result = structuredOutput
+                ? GetStructuredContent(context, content, hasContent, finishReason, lengthTruncated)
+                : GetPlainTextContent(content, hasContent, finishReason, lengthTruncated);
+
             Message.Modifications ??= new DynamicJsonValue(Message);
             Message.Modifications[Constants.ResponseFields.Content] = result;
 
             return result;
         }
 
+        private object GetStructuredContent(JsonOperationContext context, LazyStringValue content, bool hasContent, string finishReason, bool lengthTruncated)
+        {
+            // a truncated response is incomplete even if its content is valid JSON
+            if (lengthTruncated)
+                throw Truncated();
+
+            // content -> reasoning_content -> reasoning: reasoning is only a fallback when no 'content' was
+            // produced at all (RavenDB-25681)
+            if (hasContent == false && TryGetDeltaReasoning(Message, out content) == false)
+                throw NoUsableAnswer(finishReason);
+
+            try
+            {
+                return context.Sync.ReadForMemory(content, "ai/output");
+            }
+            catch (Exception e) when (e is InvalidDataException or InvalidStartOfObjectException or EndOfStreamException)
+            {
+                throw UnexpectedResponseException.Create(
+                    $"Structured output was requested but the model returned content that is not valid JSON (finish_reason='{finishReason}'). Content: {content}",
+                    response, responseContent);
+            }
+        }
+
+        private object GetPlainTextContent(LazyStringValue content, bool hasContent, string finishReason, bool lengthTruncated)
+        {
+            if (hasContent == false)
+            {
+                if (lengthTruncated)
+                    throw Truncated();
+
+                if (TryGetDeltaContent(Message, out content) == false)
+                    throw NoUsableAnswer(finishReason);
+            }
+
+            return content.ToString();
+        }
+
+        private Exception NoUsableAnswer(string finishReason)
+        {
+            var refusal = client.GetRefusal(_choice0, Message);
+            if (string.IsNullOrEmpty(refusal) == false)
+                RefusedToAnswerException.Throw(refusal, responseContent.ToString(), finishReason, GetRequestId(response.Headers));
+
+            return UnexpectedResponseException.Create(message: "No response content", response, responseContent);
+        }
+
+        private TooManyTokensException Truncated() =>
+            new($"The model response was truncated (finish_reason='length') before producing a complete answer. Response content: {responseContent}")
+            {
+                RequestId = GetRequestId(response.Headers)
+            };
     }
 
     protected virtual Task<HttpResponseMessage> SendRequestAsync(HttpRequestMessage request, CancellationToken token) => _client.SendAsync(request, token);
@@ -420,30 +761,46 @@ public class ChatCompletionClient : IDisposable
     protected virtual Task<HttpResponseMessage> SendStreamingRequestAsync(HttpRequestMessage request, CancellationToken token) => _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
 
      public HttpRequestMessage CreateCompletionRequest(JsonOperationContext ctx,
-        List<BlittableJsonReaderObject> messages,
+        IEnumerable<BlittableJsonReaderObject> messages,
         List<AiAttachment> attachments,
         List<BlittableJsonReaderObject> tools,
         bool useTools,
         bool streaming,
-        string schema)
-     {
-
+        string schema,
+        string promptCacheKey = null,
+        AiDebugTrace trace = null)
+    {
         if (_settings.Model is null)
             throw new ArgumentNullException(nameof(_settings.Model));
 
-        var content = new BlittableJsonContent(async stream =>
-        {
-            await using (var writer = new AsyncBlittableJsonTextWriter(ctx, stream))
-            {
-                if (_forTestingPurposes?.ModifyPayload != null)
-                {
-                    _forTestingPurposes?.ModifyPayload.Invoke(writer);
-                    return;
-                }
+        trace?.CaptureAttachments(attachments);
 
-                WriteCompletionRequestPayload(writer, ctx, 
-                    messages.Where(IsValidMessage) // IEnumerable of valid messages
-                    , attachments, tools, useTools, streaming, schema);
+        HttpContent content = new BlittableJsonContent(async stream =>
+        {
+            if (trace == null)
+            {
+                await WritePayloadAsync(stream).ConfigureAwait(false);
+                return;
+            }
+
+            await using var target = new TeeStream(stream);
+            try
+            {
+                await WritePayloadAsync(target).ConfigureAwait(false);
+            }
+            finally
+            {
+                trace.CaptureRequestBody(target.Result());
+            }
+
+            async Task WritePayloadAsync(Stream s)
+            {
+                await using var writer = new AsyncBlittableJsonTextWriter(ctx, s);
+                if (_forTestingPurposes?.ModifyPayload != null)
+                    _forTestingPurposes.ModifyPayload.Invoke(writer);
+                else
+                    WriteCompletionRequestPayload(writer, ctx, messages.Where(IsValidMessage),
+                        attachments, tools, useTools, streaming, schema, promptCacheKey);
             }
         }, ConventionsToUse);
 
@@ -463,7 +820,7 @@ public class ChatCompletionClient : IDisposable
     }
 
     public void WriteCompletionRequestPayload(AsyncBlittableJsonTextWriter writer, JsonOperationContext ctx, IEnumerable<BlittableJsonReaderObject> messages, List<AiAttachment> attachments, List<BlittableJsonReaderObject> tools, bool useTools, bool streaming,
-        string schema)
+        string schema, string promptCacheKey = null)
     {
         writer.WriteStartObject();
 
@@ -471,7 +828,7 @@ public class ChatCompletionClient : IDisposable
         writer.WriteString(_settings.Model);
         writer.WriteComma();
 
-        List<LazyStringValue> filterProperties = [ctx.GetLazyString(ConversationDocument.DateProperty), ctx.GetLazyString(ConversationDocument.UsageProperty)];
+        List<LazyStringValue> filterProperties = [ctx.GetLazyString(ConversationDocument.DateProperty), ctx.GetLazyString(ConversationDocument.UsageProperty), ctx.GetLazyString(ConversationDocument.OutputSchemaProperty)];
 
         writer.WriteArray(ctx, Constants.RequestFields.Messages, WithAttachments(ctx, messages, attachments), (w, context, message) =>
         {
@@ -482,30 +839,33 @@ public class ChatCompletionClient : IDisposable
             w.WriteObjectWithFilter(message, filterProperties.Contains);
             w.WriteEndObject();
         });
-        writer.WriteComma();
 
         // Optional
-        if (tools?.Count > 0)
+        if (tools?.Count > 0 && (useTools || _settings.SupportsToolChoiceNone))
         {
-            writer.WriteArray(Constants.RequestFields.Tools, tools);
             writer.WriteComma();
+            writer.WriteArray(Constants.RequestFields.Tools, tools);
 
             if (useTools is false)
             {
+                writer.WriteComma();
                 writer.WritePropertyName(Constants.RequestFields.ToolChoice);
                 writer.WriteString("none");
-                writer.WriteComma();
             }
         }
 
-        writer.WritePropertyName(Constants.RequestFields.ResponseFormat);
-        writer.WriteStartObject();
-        writer.WritePropertyName(Constants.RequestFields.Type);
-        writer.WriteString(Constants.RequestFields.JsonSchema);
-        writer.WriteComma();
-        writer.WritePropertyName(Constants.RequestFields.JsonSchema);
-        writer.WriteObject(GetStructuredOutputSchemaAsBlittable());
-        writer.WriteEndObject();
+        if (schema != null)
+        {
+            writer.WriteComma();
+            writer.WritePropertyName(Constants.RequestFields.ResponseFormat);
+            writer.WriteStartObject();
+            writer.WritePropertyName(Constants.RequestFields.Type);
+            writer.WriteString(Constants.RequestFields.JsonSchema);
+            writer.WriteComma();
+            writer.WritePropertyName(Constants.RequestFields.JsonSchema);
+            writer.WriteObject(GetStructuredOutputSchemaAsBlittable());
+            writer.WriteEndObject();
+        }
 
         if (streaming)
         {
@@ -518,6 +878,13 @@ public class ChatCompletionClient : IDisposable
             writer.WritePropertyName(Constants.RequestFields.IncludeUsage);
             writer.WriteBool(true);
             writer.WriteEndObject();
+        }
+
+        if (promptCacheKey != null && _settings.EnablePromptCaching)
+        {
+            writer.WriteComma();
+            writer.WritePropertyName(Constants.RequestFields.PromptCacheKey);
+            writer.WriteString(promptCacheKey);
         }
 
         _settings.HandleCompletionRequestPayload(writer);
@@ -621,18 +988,10 @@ public class ChatCompletionClient : IDisposable
             {
                 return await _settings.TryGetResponseContentAsync(context, ms).ConfigureAwait(false);
             }
-            catch (InvalidDataException ide) when (ide.Message.Contains("Cannot have a '<' in this position at  (1,2) around:")) // likely HTML response
+            catch (Exception)
             {
-                ms.Position = 0;
-                string content = Encoding.UTF8.GetString(ms.GetMemory().Span[..contentLength]);
-
-                throw UnexpectedResponseException.Create(message: "Received an unrecognized response from the server", response, content);
-            }
-            catch (Exception e)
-            {
-                ms.Position = 0;
-                string content = Encoding.UTF8.GetString(ms.GetMemory().Span[..contentLength]);
-                throw UnexpectedResponseException.Create(message: "Received an unrecognized response from the server", response, content, e);
+                var rawBody = Encoding.UTF8.GetString(ms.GetBuffer(), 0, contentLength);
+                throw UnexpectedResponseException.Create(message: "Received an unrecognized response from the server", response, rawBody);
             }
         }
     }
@@ -707,6 +1066,8 @@ public class ChatCompletionClient : IDisposable
     }
 
     private string GetRefusal(BlittableJsonReaderObject choice0, BlittableJsonReaderObject message) => _settings.GetRefusal(choice0, message);
+
+    private string GetFinishReason(BlittableJsonReaderObject choice0) => _settings.GetFinishReason(choice0);
 
     internal static string GetRequestId(HttpResponseHeaders headers)
     {
@@ -952,6 +1313,8 @@ public class ChatCompletionClient : IDisposable
             public const string ReasoningContent = "reasoning_content";
             public const string Reasoning = "reasoning";
             public const string FinishReason = "finish_reason";
+            public const string FinishReasonLength = "length";
+            public const string FinishReasonContentFilter = "content_filter";
             public const string ToolCalls = "tool_calls";
             public const string Refusal = "refusal";
             public const string Usage = "usage";
@@ -1046,6 +1409,7 @@ public class ChatCompletionClient : IDisposable
             public const string Stream = "stream";
             public const string StreamOptions = "stream_options";
             public const string IncludeUsage = "include_usage";
+            public const string PromptCacheKey = "prompt_cache_key";
         }
 
         public static class AttachmentsRequestFields

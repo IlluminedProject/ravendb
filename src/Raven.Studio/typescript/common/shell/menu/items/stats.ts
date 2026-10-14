@@ -1,7 +1,9 @@
 ﻿import intermediateMenuItem = require("common/shell/menu/intermediateMenuItem");
 import leafMenuItem = require("common/shell/menu/leafMenuItem");
+import separatorMenuItem = require("common/shell/menu/separatorMenuItem");
 import reactUtils = require("common/reactUtils");
 import StatisticsPage = require("components/pages/database/status/statistics/StatisticsPage");
+import TombstonesState = require("components/pages/database/status/tombstones/TombstonesState");
 import activeDatabaseTracker = require("common/shell/activeDatabaseTracker");
 import shardedDatabase = require("models/resources/shardedDatabase");
 import shard = require("models/resources/shard");
@@ -73,14 +75,31 @@ function getStatsMenuItem(appUrls: computedAppUrls) {
             route: 'databases/status/ongoingTasksStats',
             moduleId: require('viewmodels/database/status/ongoingTasksStats'),
             shardingMode: "singleShard",
-            title: 'Ongoing Tasks Stats',
+            title: 'Ongoing Task Stats',
             nav: true,
             css: 'icon-replication-stats',
             dynamicHash: appUrls.ongoingTasksStats,
             search: {
                 innerActions: [
-                    { name: "Export Ongoing Tasks Stats" },
-                    { name: "Import Ongoing Tasks Stats" },
+                    { name: "Export Ongoing Task Stats" },
+                    { name: "Import Ongoing Task Stats" },
+                ],
+            },
+        }),
+        new separatorMenuItem(),
+        new separatorMenuItem('Advanced'),
+        new leafMenuItem({
+            route: 'databases/status/tombstonesState',
+            moduleId: reactUtils.bridgeToReact(TombstonesState.default, "shardedView"),
+            title: 'Tombstones',
+            nav: true,
+            shardingMode: "singleShard",
+            css: 'icon-tombstones',
+            dynamicHash: appUrls.tombstonesState,
+            requiredAccess: "Operator",
+            search: {
+                innerActions: [
+                    { name: "Force cleanup" },
                 ],
             },
         }),

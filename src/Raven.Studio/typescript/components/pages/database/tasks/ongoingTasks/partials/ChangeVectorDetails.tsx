@@ -31,10 +31,10 @@ export function ChangeVectorDetails(props: ChangeVectorDetailsProps) {
     }
 
     return (
-        <div className="px-2">
+        <div>
             {sourceDatabaseChangeVectorFormatted && (
-                <div className="mb-3">
-                    <FormLabel for="sourceDatabaseCv" className="mb-0 md-label">
+                <div className="mb-2">
+                    <FormLabel htmlFor="sourceDatabaseCv" className="mb-0 md-label">
                         Source database CV
                     </FormLabel>
                     <InputGroup>
@@ -63,7 +63,7 @@ export function ChangeVectorDetails(props: ChangeVectorDetailsProps) {
 
             {lastAcceptedChangeVectorFromDestinationFormatted && (
                 <div>
-                    <FormLabel for="lastAcceptedCV" className="mb-0 md-label">
+                    <FormLabel htmlFor="lastAcceptedCV" className="mb-0 md-label">
                         Last accepted CV (from destination)
                     </FormLabel>
                     <InputGroup>

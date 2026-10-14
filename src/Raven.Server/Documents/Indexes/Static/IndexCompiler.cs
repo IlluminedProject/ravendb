@@ -335,6 +335,7 @@ namespace Raven.Server.Documents.Indexes.Static
             );
 
             var rewriter = new MethodDynamicParametersRewriter();
+            var recursionGuard = new RecursionGuardRewriter();
             result.SyntaxTrees = new List<SyntaxTree>();
 
             foreach (var kvp in syntaxTrees) //now do the rewrites
@@ -344,7 +345,8 @@ namespace Raven.Server.Documents.Indexes.Static
 
                 rewriter.SemanticModel = tempCompilation.GetSemanticModel(tree);
 
-                var rewritten = rewriter.Visit(tree.GetRoot()).NormalizeWhitespace();
+                var rewritten = rewriter.Visit(tree.GetRoot());
+                rewritten = recursionGuard.Visit(rewritten).NormalizeWhitespace();
 
                 SyntaxTree syntaxTree;
 
@@ -647,6 +649,45 @@ namespace Raven.Server.Documents.Indexes.Static
             return fields;
         }
 
+        private static string GetSourceIdentifier(IndexSourceType type)
+        {
+            switch (type)
+            {
+                case IndexSourceType.Documents:
+                    return "docs";
+                case IndexSourceType.TimeSeries:
+                    return "timeSeries";
+                case IndexSourceType.Counters:
+                    return "counters";
+                default:
+                    throw new NotSupportedException($"Not supported source type '{type}'.");
+            }
+        }
+
+        private static void ThrowIfMapDoesNotEnumerateSource(ExpressionSyntax expression, string sourceIdentifier)
+        {
+            ExpressionSyntax source;
+            switch (expression)
+            {
+                case QueryExpressionSyntax query:
+                    source = query.FromClause.Expression;
+                    break;
+                case InvocationExpressionSyntax invocation:
+                    source = invocation;
+                    break;
+                default:
+                    return;
+            }
+
+            var root = CollectionNameRetriever.GetRootIdentifier(source);
+            if (string.Equals(root, sourceIdentifier, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            throw new InvalidOperationException(
+                $"An index map must start its enumeration from '{sourceIdentifier}', e.g. 'from item in {sourceIdentifier}.CollectionName' or '{sourceIdentifier}.CollectionName.Select(...)'. " +
+                "The outer-most clause of the given map enumerates over a different source, which cannot be compiled into an index.");
+        }
+
         private static List<StatementSyntax> HandleMap(string indexName, IndexSourceType type, string map, FieldNamesValidator fieldNamesValidator, MethodDetectorRewriter methodsDetector, StackDepthRetriever stackDepthRetriever,
             ref SyntaxList<MemberDeclarationSyntax> members)
         {
@@ -654,6 +695,8 @@ namespace Raven.Server.Documents.Indexes.Static
             {
                 map = NormalizeFunction(map);
                 var expression = SyntaxFactory.ParseExpression(map).NormalizeWhitespace();
+
+                ThrowIfMapDoesNotEnumerateSource(expression, GetSourceIdentifier(type));
 
                 fieldNamesValidator.Validate(map, expression);
                 methodsDetector.Visit(expression);

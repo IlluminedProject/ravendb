@@ -1,3 +1,4 @@
+import { AiAgentGenerateCodeResultDto } from "commands/database/aiAgents/generateCodeAiAgentCommand";
 import document from "models/database/documents/document";
 
 export class AiAgentStubs {
@@ -183,6 +184,19 @@ export class AiAgentStubs {
                     date: "2025-08-08T10:28:20.5582526Z",
                 },
                 {
+                    role: "assistant",
+                    content:
+                        "Summary of previous conversation: - The conversation began with the user saying “Hello,” and the assistant responded politely with “Hello! How can I help you today?”\n- The user then requested: “Answer with some long text.” The assistant complied with a long, imaginative, narrative-style story about a mountain village and an explorer searching for a legendary library of every season. The story included advice from an old shepherd and encounters with a merchant, poet, and mechanic, and ended with the reveal that the library contained blank pages meant for the visitor to write their own chapter. The assistant closed by offering to make the text more poetic, more formal, or much longer.\n- The user then said “thanks,” and the assistant replied briefly and warmly: “You're welcome! If you'd like, I can also help with a new question or continue the conversation.”\n- The user then issued a reminder to go over the entire previous conversation and summarize it according to the original instructions, emphasizing that the final summary should include any essential tool results for future turns.\n- No tools were called at any point, so there are no external IDs, codes, prices, dates, or other tool outputs to preserve.\n\nResults Cache:\n- None (no tools were used).",
+                    date: "2026-04-08T11:48:12.4936949Z",
+                    usage: {
+                        PromptTokens: 730,
+                        CompletionTokens: 300,
+                        TotalTokens: 1030,
+                        CachedTokens: 0,
+                        ReasoningTokens: 0,
+                    },
+                },
+                {
                     role: "user",
                     content: "AI Agent Parameters:\ncompany = companies/90-A\r\n",
                     date: "2025-08-08T10:28:20.5582755Z",
@@ -210,7 +224,7 @@ export class AiAgentStubs {
                             },
                         },
                         {
-                            id: "call_whzFC5Mlx17thYJYOvdWf7RW",
+                            id: "call_whzFC5Mlx17thYJYOvdWf7RZ",
                             type: "function",
                             function: {
                                 name: "TEST_parameters",
@@ -340,7 +354,15 @@ export class AiAgentStubs {
                 CachedTokens: 0,
                 ReasoningTokens: 20,
             },
-            OpenActionCalls: {},
+            OpenActionCalls: {
+                call_MdKvWaFtl0cJAc5a0q26Lo97: {
+                    Name: "ActionProductSearch",
+                    ToolId: "call_MdKvWaFtl0cJAc5a0q26Lo99",
+                    Arguments: "{}",
+                    Type: "UserAction",
+                    SubConversationId: null,
+                },
+            },
             LastMessageAt: "2025-08-08T10:28:30.5884757Z",
             CreatedAt: "2025-08-08T10:28:20.5582091Z",
             Expires: null,
@@ -351,5 +373,12 @@ export class AiAgentStubs {
                 "@last-modified": "2025-08-20T09:27:14.9226011Z",
             },
         });
+    }
+
+    static getGeneratedCode(): AiAgentGenerateCodeResultDto {
+        return {
+            GeneratedCode:
+                'using System;\r\nusing System.Collections.Generic;\r\nusing Raven.Client.Documents.Operations.AI.Agents;\r\n\r\npublic class GeneratedAgentTest\r\n{\r\n    public void Run()\r\n    {\r\n        var agentCSharp = new AiAgentConfiguration\r\n        {\r\n            Identifier = "sub-agent-1",\r\n            Name = "sub-agent-1",\r\n            ConnectionStringName = "openai-gpt5.4-mini",\r\n            SystemPrompt = "Please provide comprehensive and accurate answers to any questions posed.",\r\n            SampleObject = "{\n    \\"Answer\\": \\"Answer\\"\n}",\r\n            ChatTrimming = new AiAgentChatTrimmingConfiguration\r\n            {\r\n                Tokens = new AiAgentSummarizationByTokens\r\n                {\r\n                    SummarizationTaskBeginningPrompt = "Summarize the following AI conversation into a concise, linear narrative that retains all critical information. Ensure the summary:\r\n- Includes key identifiers, usernames, timestamps, and any reference codes\r\n- Preserves the original intent of both the user and the assistant in each exchange\r\n- Reflects decisions made, suggestions given, preferences expressed, and any changes in direction\r\n- Captures tone when relevant (e.g., sarcastic, formal, humorous, concerned)\r\n- Omits general filler or small talk unless it contributes to context or tone Format the output in a structured manner (such as bullet points or labeled sections) suitable for fitting into a limited context window. Do not discard any information that contributes to understanding the conversation\'s flow and outcome.\r\n- If the transcript ends with tool output, your summary must explicitly include the key results from those tool calls - extract the key facts (IDs, names, prices, dates, etc.) and include them in a Results Cache block inside your summary, so they are preserved for the next turns and the conversation can continue without re-running the same tools.",\r\n                    SummarizationTaskEndPrompt = "Reminder:\r\n- Go over the entire previous conversation and summarize that according to the original instructions.\r\n- Make sure the final summary message contains the essential tool results already obtained, so they are available for future turns.",\r\n                    ResultPrefix = "Summary of previous conversation: "\r\n                }\r\n            }\r\n        };\r\n    }\r\n}',
+        };
     }
 }

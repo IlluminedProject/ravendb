@@ -16,12 +16,21 @@ namespace Raven.Server.Documents.Studio
 
         public long CountOfIndexingErrors { get; set; }
 
+        public long CountOfEtlTasksErrors { get; set; }
+
+        public long CountOfAiTasksErrors { get; set; }
+
+        public long CountOfCdcSinkTasksErrors { get; set; }
+
         public void CombineWith(FooterStatistics stats)
         {
             CountOfDocuments += stats.CountOfDocuments;
 
             CountOfIndexes = stats.CountOfIndexes; // every node has the same amount of indexes
             CountOfIndexingErrors += stats.CountOfIndexingErrors;
+            CountOfEtlTasksErrors += stats.CountOfEtlTasksErrors;
+            CountOfAiTasksErrors += stats.CountOfAiTasksErrors;
+            CountOfCdcSinkTasksErrors += stats.CountOfCdcSinkTasksErrors;
 
             if (StaleIndexes == null)
                 StaleIndexes = stats.StaleIndexes;
@@ -31,7 +40,7 @@ namespace Raven.Server.Documents.Studio
                 staleIndexes.UnionWith(stats.StaleIndexes);
 
                 StaleIndexes = staleIndexes.ToArray();
-;            }
+            }
 
             CountOfStaleIndexes = StaleIndexes?.Length ?? 0;
         }

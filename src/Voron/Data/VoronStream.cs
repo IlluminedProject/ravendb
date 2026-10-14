@@ -9,29 +9,21 @@ namespace Voron.Data
 {
     public unsafe class VoronStream : Stream
     {
-        public Slice Name { get; }
-
         private readonly Tree.ChunkDetails[] _chunksDetails;
         private readonly long[] _chunksOffsets;
         private readonly bool _encrypted;
         private long _position;
         private int _index;
-        protected LowLevelTransaction Llt;
-        protected Page LastPage;
+        internal LowLevelTransaction Llt;
+        internal Page LastPage;
 
         public override bool CanRead => true;
         public override bool CanSeek => true;
         public override bool CanWrite => false;
         public sealed override long Length { get; }
 
-        public override string ToString()
+        public VoronStream(Tree.ChunkDetails[] chunksDetails, LowLevelTransaction llt)
         {
-            return Name.ToString();
-        }
-
-        public VoronStream(Slice name, Tree.ChunkDetails[] chunksDetails, LowLevelTransaction llt)
-        {
-            Name = name;
             _chunksDetails = chunksDetails;
             _chunksOffsets = new long[_chunksDetails.Length];
 
@@ -113,6 +105,9 @@ namespace Voron.Data
             UpdateLastPageIfNeeded(chunk.PageNumber);
 
             var pos = _position - _chunksOffsets[_index];
+            if (pos < 0 || pos >= chunk.ChunkSize)
+                ThrowReadOutOfChunkBounds(pos, 1, chunk.ChunkSize);
+
             _position++; //move ptr
             return LastPage.DataPointer[pos];
         }
@@ -144,6 +139,10 @@ namespace Voron.Data
             UpdateLastPageIfNeeded(chunk.PageNumber);
 
             var pos = _position - _chunksOffsets[_index];
+            // fail here rather than let a bad offset turn into an out-of-bounds native read (AVE)
+            if (pos < 0 || pos + count > chunk.ChunkSize)
+                ThrowReadOutOfChunkBounds(pos, count, chunk.ChunkSize);
+
             fixed (byte* dst = buffer)
             {
                 Memory.Copy(dst + offset, LastPage.DataPointer + pos, count);
@@ -210,9 +209,22 @@ namespace Voron.Data
         }
 
         [DoesNotReturn]
+        private void ThrowReadOutOfChunkBounds(long pos, int count, int chunkSize)
+        {
+            throw new InvalidOperationException(
+                $"Attempted to read {count} byte(s) at offset {pos} of chunk {_index}, but that chunk holds {chunkSize} bytes. Stream position: {_position}, length: {Length}.");
+        }
+
+        [DoesNotReturn]
         private static void ThrowWhenValueIsEqualOrLessZero(long position)
         {
             throw new ArgumentException($"Position {position} is not possible inside {nameof(VoronStream)}.");
+        }
+
+        internal void Reset()
+        {
+            Llt = null;
+            LastPage = default(Page);
         }
     }
 }

@@ -29,6 +29,7 @@ using Sparrow.Json.Parsing;
 using Tests.Infrastructure;
 using Xunit;
 using SVC = Raven.Server.Documents.SchemaValidation.SchemaValidatorConstants;
+using Raven.Server.Documents.TasksErrors;
 
 namespace SlowTests.SchemaValidation;
 
@@ -409,7 +410,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
         }
     }
 
-    [RavenFact(RavenTestCategory.Smuggler)]
+    [RavenFact(RavenTestCategory.Smuggler | RavenTestCategory.BackupExportImport)]
     public async Task SchemaValidation_WhenRestoreInvalidData_ShouldRestore()
     {
         var schemaDefinitionObj = new DynamicJsonValue { [SVC.Properties] = new DynamicJsonValue { ["Prop"] = new DynamicJsonValue { [SVC.Const] = "123" } } };
@@ -460,7 +461,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
         Assert.StartsWith("Raven.Client.Exceptions.SchemaValidation.SchemaValidationException: The value at 'Prop' must be '\"123\"', but it is '\"1234\"'.", e.Message);
     }
 
-    [RavenFact(RavenTestCategory.JavaScript)]
+    [RavenFact(RavenTestCategory.JavaScript | RavenTestCategory.Etl)]
     public async Task SchemaValidation_WhenEtl_ShouldValidateAndFailInNeeded()
     {
         var schemaDefinitionObj = new DynamicJsonValue { [SVC.Properties] = new DynamicJsonValue { ["Prop"] = new DynamicJsonValue { [SVC.Const] = "123" } } };
@@ -494,11 +495,11 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
         {
             var response = await client.GetAsync($"{source.Urls.First()}/databases/{source.Database}/etl/stats");
             var json = await context.ReadForMemoryAsync(await response.Content.ReadAsStreamAsync(), "etl/test/script");
-            return HasError(json);
+            return await HasError(json);
         });
         return;
 
-        bool HasError(BlittableJsonReaderObject json)
+        async Task<bool> HasError(BlittableJsonReaderObject json)
         {
             if (json.TryGet("Results", out BlittableJsonReaderArray results) == false || results.Length == 0 || results.First() is not BlittableJsonReaderObject result)
                 return false;
@@ -510,24 +511,18 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
             if (stat.TryGet(nameof(EtlProcessTransformationStats.Statistics), out BlittableJsonReaderObject statistics) == false)
                 return false;
 
-            if (statistics.TryGet(nameof(EtlProcessStatistics.LastAlert), out BlittableJsonReaderObject lastAlert) == false || lastAlert == null)
+            var database = await GetDatabase(source.Database);
+
+            var processErrors = database.TaskErrorsStorage.ReadAllProcessErrors(TaskCategory.Etl);
+            if (processErrors.Count == 0)
                 return false;
 
-            if (lastAlert.TryGet(nameof(AlertRaised.Details), out BlittableJsonReaderObject details) == false)
-                return false;
-
-            if (details.TryGet(nameof(EtlErrorsDetails.Errors), out BlittableJsonReaderArray errors) == false || errors.Length == 0 ||
-                errors.First() is not BlittableJsonReaderObject errorInfo)
-                return false;
-
-            if(errorInfo.TryGet(nameof(EtlErrorInfo.Error), out string error) == false || string.IsNullOrEmpty(error))
-                return false;
-            
-            return error.StartsWith("Raven.Client.Exceptions.SchemaValidation.SchemaValidationException: Raven.Client.Exceptions.SchemaValidation.SchemaValidationException: The value at 'Prop' must be '\"123\"', but it is '\"1234\"");
+            var processError = processErrors.First();
+            return processError.Error.Contains("Raven.Client.Exceptions.SchemaValidation.SchemaValidationException: The value at 'Prop' must be '\"123\"', but it is '\"1234\"");
         }
     }
 
-    [RavenFact(RavenTestCategory.JavaScript)]
+    [RavenFact(RavenTestCategory.JavaScript | RavenTestCategory.Replication)]
     public async Task SchemaValidation_WhenInternalReplicateInvalidData_ShouldNotThrow()
     {
         var (nodes, _) = await CreateRaftCluster(3);
@@ -629,7 +624,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
         Assert.Contains("The value of 'properties' must be an object, but received 'ShouldBeObject' of type 'string'. Schema path '#/properties'.", e.Message);
     }
     
-    [RavenFact(RavenTestCategory.JavaScript)]
+    [RavenFact(RavenTestCategory.JavaScript | RavenTestCategory.Revisions)]
     public async Task SchemaValidation_WhenRevertRevisionAndSchemaIsEnabled_ShouldThrowWhen()
     {
         var schemaDefinitionObj = new DynamicJsonValue { [SVC.Properties] = new DynamicJsonValue { ["Prop"] = new DynamicJsonValue { [SVC.Const] = "123" } } };
@@ -671,7 +666,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
             var changeVector = revisions[1].GetString(Constants.Documents.Metadata.ChangeVector);
             
             var e = await Assert.ThrowsAnyAsync<RavenException>(async () => await store.Operations.SendAsync(new RevertRevisionsByIdOperation(id, changeVector)));
-            Assert.Contains("System.InvalidOperationException: Reverting documents to revisions is not allowed when Schema Validation is enabled. Please disable Schema Validation and try again.", e.Message);
+            Assert.Contains("Reverting documents to revisions is not allowed when Schema Validation is enabled. Please disable Schema Validation and try again.", e.Message);
             
             configuration.Disabled = true;
             await store.Maintenance.SendAsync(new ConfigureSchemaValidationOperation(configuration));
@@ -680,7 +675,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
         }
     }
 
-    [RavenFact(RavenTestCategory.JavaScript)]
+    [RavenFact(RavenTestCategory.JavaScript | RavenTestCategory.Revisions)]
     public async Task SchemaValidation_WhenRevertRevisionByTimeSchemaIsEnabled_ShouldThrow()
     {
         var schemaDefinitionObj = new DynamicJsonValue { [SVC.Properties] = new DynamicJsonValue { ["Prop"] = new DynamicJsonValue { [SVC.MaxLength] = 3 } } };
@@ -726,7 +721,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
             var operation = await store.Maintenance.SendAsync(new RevisionsHelper.RevertRevisionsOperation(revisionTime, 1));
             await operation.WaitForCompletionAsync<RevertResult>(TimeSpan.FromSeconds(5));
         });
-        Assert.Contains("System.InvalidOperationException: Reverting documents to revisions is not allowed when Schema Validation is enabled. Please disable Schema Validation and try again.", e.Message);
+        Assert.Contains("Reverting documents to revisions is not allowed when Schema Validation is enabled. Please disable Schema Validation and try again.", e.Message);
         
         configuration.Disabled = true;
         await store.Maintenance.SendAsync(new ConfigureSchemaValidationOperation(configuration));
@@ -737,7 +732,7 @@ public class BasicIntegrationSchemaValidationTests : ReplicationTestBase
     
     private static void AssertError(string expected, string actual)
     {
-        if(actual.Contains(expected) == false)
+        if (actual.Contains(expected) == false)
             Assert.Fail($"expected: {expected}, actual: {actual}");
     }
 }

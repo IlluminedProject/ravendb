@@ -363,9 +363,9 @@ namespace Raven.Server.Documents.Indexes.Static
         {
             //Here we construct the function so if we iterate only functions we will be able to iterate ArrowFunctions too
             var statement =
-                arrowFunctionExpression.Expression
+                arrowFunctionExpression.Body is not FunctionBody body
                     ? new FunctionBody(NodeList.From(new List<Statement> { new ReturnStatement(arrowFunctionExpression.Body.As<Expression>()) }), strict: true)
-                    : arrowFunctionExpression.Body.As<FunctionBody>();
+                    : body;
             var func = new FunctionExpression(
                 new Identifier(null),
                 arrowFunctionExpression.Params,
@@ -412,7 +412,7 @@ namespace Raven.Server.Documents.Indexes.Static
                 }
                 else
                 {
-                    VisitRestElement((RestElement) p);
+                    VisitSpreadElement((SpreadElement) p);
                 }
             }
         }
@@ -738,7 +738,7 @@ namespace Raven.Server.Documents.Indexes.Static
 
         public virtual void VisitSpreadElement(SpreadElement spreadElement)
         {
-            VisitIdentifier(spreadElement.Argument.As<Identifier>());
+            VisitExpression(spreadElement.Argument);
         }
 
         public virtual void VisitAssignmentPattern(AssignmentPattern assignmentPattern)

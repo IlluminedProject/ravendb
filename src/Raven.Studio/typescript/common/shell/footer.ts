@@ -13,10 +13,13 @@ import clientCertificateModel = require("models/auth/clientCertificateModel");
 import viewHelpers = require("common/helpers/view/viewHelpers");
 
 class footerStats {
-    countOfDocuments = ko.observable<number>();
-    countOfIndexes = ko.observable<number>();
-    countOfStaleIndexes = ko.observable<number>();
-    countOfIndexingErrors = ko.observable<number>();
+    countOfDocuments = ko.observable<number>(0);
+    countOfIndexes = ko.observable<number>(0);
+    countOfStaleIndexes = ko.observable<number>(0);
+    countOfIndexingErrors = ko.observable<number>(0);
+    countOfEtlTasksErrors = ko.observable<number>(0);
+    countOfAiTasksErrors = ko.observable<number>(0);
+    countOfCdcSinkTasksErrors = ko.observable<number>(0);
 }
 
 class footer {
@@ -35,7 +38,16 @@ class footer {
     urlForStaleIndexes = ko.pureComputed(() => appUrl.forIndexes(this.db(), null, true));
     urlForIndexingErrors = ko.pureComputed(() => appUrl.forIndexErrors(this.db()));
     urlForAbout = appUrl.forAbout();
-    
+
+    ssoAppUrl = ko.pureComputed<string | null>(() => {
+        const cert = clientCertificateModel.certificateInfo();
+        if (!cert || cert.Usage !== "SsoClient") {
+            return null;
+        }
+        const ssoHostname = window.location.hostname.replace(/^[^.]+\./, "");
+        return `${window.location.protocol}//${ssoHostname}/clusters`;
+    });
+
     twoFactorSessionExpiration: KnockoutComputed<moment.Moment>;
 
     licenseClass = license.licenseCssClass;
@@ -73,15 +85,18 @@ class footer {
         this.spinners.loading(true);
 
         this.fetchStats()
-            .done((stats) => {
+            .then((stats) => {
                 const newStats = new footerStats();
                 newStats.countOfDocuments(stats.CountOfDocuments);
                 newStats.countOfIndexes(stats.CountOfIndexes);
                 newStats.countOfStaleIndexes(stats.CountOfStaleIndexes);
                 newStats.countOfIndexingErrors(stats.CountOfIndexingErrors);
+                newStats.countOfEtlTasksErrors(stats.CountOfEtlTasksErrors);
+                newStats.countOfAiTasksErrors(stats.CountOfAiTasksErrors);
+                newStats.countOfCdcSinkTasksErrors(stats.CountOfCdcSinkTasksErrors);
                 this.stats(newStats);
             })
-            .always(() => this.spinners.loading(false));
+            .finally(() => this.spinners.loading(false));
     }
     
     logout() {
@@ -97,10 +112,62 @@ class footer {
             });
     }
 
-    private fetchStats(): JQueryPromise<Raven.Server.Documents.Studio.FooterStatistics> {
+    refreshStats() {
+        this.fetchStats()
+            .then((stats) => {
+                let currentStats = this.stats();
+                if (!currentStats) {
+                    currentStats = new footerStats();
+                    this.stats(currentStats);
+                    return;
+                }
+                currentStats.countOfDocuments(stats.CountOfDocuments);
+                currentStats.countOfIndexes(stats.CountOfIndexes);
+                currentStats.countOfStaleIndexes(stats.CountOfStaleIndexes);
+                currentStats.countOfIndexingErrors(stats.CountOfIndexingErrors);
+                currentStats.countOfEtlTasksErrors(stats.CountOfEtlTasksErrors);
+                currentStats.countOfAiTasksErrors(stats.CountOfAiTasksErrors);
+                currentStats.countOfCdcSinkTasksErrors(stats.CountOfCdcSinkTasksErrors);
+            });
+    }
+
+    private async fetchStats(): Promise<Raven.Server.Documents.Studio.FooterStatistics> {
         const db = this.db();
-        return new getDatabaseFooterStatsCommand(db)
-            .execute();
+
+        let results: Raven.Server.Documents.Studio.FooterStatistics[];
+        if (db.isSharded()) {
+            results = [await new getDatabaseFooterStatsCommand(db).execute()];
+        } else {
+            const uniqueNodeTags = [...new Set(db.getLocations().map((location) => location.nodeTag))];
+            results = await Promise.all(
+                uniqueNodeTags.map((nodeTag) => new getDatabaseFooterStatsCommand(db, nodeTag).execute())
+            );
+        }
+
+        const staleIndexes = [...new Set(results.flatMap((s) => s.StaleIndexes ?? []))];
+
+        return results.reduce(
+            (acc, stats) => ({
+                CountOfDocuments: acc.CountOfDocuments + stats.CountOfDocuments,
+                CountOfIndexes: stats.CountOfIndexes,
+                CountOfIndexingErrors: acc.CountOfIndexingErrors + stats.CountOfIndexingErrors,
+                CountOfEtlTasksErrors: acc.CountOfEtlTasksErrors + stats.CountOfEtlTasksErrors,
+                CountOfAiTasksErrors: acc.CountOfAiTasksErrors + stats.CountOfAiTasksErrors,
+                CountOfCdcSinkTasksErrors: acc.CountOfCdcSinkTasksErrors + stats.CountOfCdcSinkTasksErrors,
+                StaleIndexes: staleIndexes,
+                CountOfStaleIndexes: staleIndexes.length,
+            }),
+            {
+                CountOfDocuments: 0,
+                CountOfIndexes: 0,
+                CountOfIndexingErrors: 0,
+                CountOfEtlTasksErrors: 0,
+                CountOfAiTasksErrors: 0,
+                CountOfCdcSinkTasksErrors: 0,
+                StaleIndexes: [],
+                CountOfStaleIndexes: 0,
+            }
+        );
     }
 
     private onDatabaseStats(event: Raven.Server.NotificationCenter.Notifications.DatabaseStatsChanged) {
@@ -108,11 +175,20 @@ class footer {
             return;
         }
 
-        const stats = this.stats();
+        let stats = this.stats();
+
+        if (!stats) {
+            stats = new footerStats();
+            this.stats(stats);
+        }
+        
         stats.countOfDocuments(event.CountOfDocuments);
         stats.countOfIndexes(event.CountOfIndexes);
         stats.countOfStaleIndexes(event.CountOfStaleIndexes);
         stats.countOfIndexingErrors(event.CountOfIndexingErrors);
+        stats.countOfEtlTasksErrors(event.CountOfEtlTasksErrors);
+        stats.countOfAiTasksErrors(event.CountOfAiTasksErrors);
+        stats.countOfCdcSinkTasksErrors(event.CountOfCdcSinkTasksErrors);
     }
     
 }

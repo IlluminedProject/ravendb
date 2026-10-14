@@ -27,15 +27,21 @@ namespace Voron.Data.BTrees
 
         public TreePage ParentOfAddedPageRef { get; private set; }
 
+        public bool PerformedSplit { get; private set; }
+
         public byte* AddSeparator(Slice separator, long pageRefNumber, int? nodePos = null)
         {
             var originalLastSearchPositionOfParent = _parentPage.LastSearchPosition;
 
-            if (nodePos == null)
-                nodePos = _parentPage.NodePositionFor(_tx, separator); // select the appropriate place for this
-
             if (_parentPage.HasSpaceFor(_tx, TreeSizeOf.BranchEntry(separator) + Constants.Tree.NodeOffsetSize) == false)
             {
+                PerformedSplit = true;
+
+                // the splitter decides the split shape based on _parentPage.LastSearchPosition - including
+                // the sequential-insert optimization that appends without a key search - so it must reflect
+                // the position of this separator instead of a leftover from the descent or another fix-up
+                _parentPage.NodePositionFor(_tx, separator);
+
                 var pageSplitter = new TreePageSplitter(_tx, _tree, separator, -1, pageRefNumber, TreeNodeFlags.PageRef, _cursor);
 
                 var posToInsert = pageSplitter.Execute();
@@ -79,6 +85,9 @@ namespace Voron.Data.BTrees
 
             ParentOfAddedPageRef = _parentPage;
 
+            if (nodePos == null)
+                nodePos = _parentPage.NodePositionFor(_tx, separator); // select the appropriate place for this
+
             var pos = _parentPage.AddPageRefNode(nodePos.Value, separator, pageRefNumber);
 
             EnsureValidLastSearchPosition(_parentPage, _currentPage.PageNumber, originalLastSearchPositionOfParent);
@@ -87,7 +96,7 @@ namespace Voron.Data.BTrees
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void EnsureValidLastSearchPosition(TreePage page, long referencedPageNumber, int originalLastSearchPosition)
+        internal static void EnsureValidLastSearchPosition(TreePage page, long referencedPageNumber, int originalLastSearchPosition)
         {
             if (page.NumberOfEntries <= originalLastSearchPosition || page.GetNode(originalLastSearchPosition)->PageNumber != referencedPageNumber)
                 page.LastSearchPosition = page.NodePositionReferencing(referencedPageNumber);

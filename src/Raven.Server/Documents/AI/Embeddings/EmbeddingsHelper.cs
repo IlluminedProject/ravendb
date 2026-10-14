@@ -26,7 +26,7 @@ public static class EmbeddingsHelper
     internal static readonly List<string> ValuesListToVerifyConnection = ["TestValue", "TestValue2"];
 
     [SkipLocalsInit]
-    public static string CalculateInputValueHash(string value)
+    public static unsafe string CalculateInputValueHash(string value)
     {
         // Here we take a string, and we:
         // * convert to upper case
@@ -51,14 +51,20 @@ public static class EmbeddingsHelper
         return Convert.ToBase64String(hashBuffer);
     }
     
+    // '@'-prefixed so it lives in the reserved namespace (like @quantization) and can never collide with a
+    // user embedding field path written as a sibling into the same per-task object.
+    public const string ChunkTextPropertyName = "@chunk-text";
+
     public static string GetEmbeddingDocumentId(string documentId)
     {
         return $"embeddings/{documentId}";
     }
 
+    public const string EmbeddingDocumentCollectionNamePrefix = "@embeddings/";
+
     public static string GetEmbeddingDocumentCollectionName(string sourceCollectionName)
     {
-        return $"@embeddings/{sourceCollectionName}";
+        return $"{EmbeddingDocumentCollectionNamePrefix}{sourceCollectionName}";
     }
 
     public static string GetEmbeddingCacheDocumentId(AiConnectionStringIdentifier id, string valueHash, VectorEmbeddingType targetQuantization)

@@ -3,10 +3,12 @@ import { orderBy } from "common/typeUtils";
 import { InputItem } from "components/models/common";
 import {
     CertificatesClearance,
+    CertificatesManagementType,
     CertificatesState,
 } from "components/pages/resources/manageServer/certificates/utils/certificatesTypes";
 import { certificatesUtils } from "components/pages/resources/manageServer/certificates/utils/certificatesUtils";
 import { RootState } from "components/store";
+import DatabaseUtils from "components/utils/DatabaseUtils";
 
 const selectClearanceFilterOptions = createSelector(
     (state: RootState) => state.certificates.certificates,
@@ -38,10 +40,11 @@ const selectStateFilterOptions = createSelector(
     (certificates): InputItem<CertificatesState>[] => {
         let validCount = 0,
             aboutToExpireCount = 0,
-            expiredCount = 0;
+            expiredCount = 0,
+            disabledCount = 0;
 
-        certificates.forEach(({ NotAfter }) => {
-            const state = certificatesUtils.getState(NotAfter);
+        certificates.forEach((cert) => {
+            const state = certificatesUtils.getState(cert);
 
             if (state === "Valid") {
                 validCount++;
@@ -54,12 +57,46 @@ const selectStateFilterOptions = createSelector(
             if (state === "Expired") {
                 expiredCount++;
             }
+            if (state === "Disabled") {
+                disabledCount++;
+            }
         });
 
         return [
             { value: "Valid", label: "Valid", count: validCount },
             { value: "About to expire", label: "About to expire", count: aboutToExpireCount },
             { value: "Expired", label: "Expired", count: expiredCount },
+            { value: "Disabled", label: "Disabled", count: disabledCount },
+        ];
+    }
+);
+
+const selectManagementTypeFilterOptions = createSelector(
+    (state: RootState) => state.certificates.certificates,
+    (state: RootState) => state.certificates.serverCertificateThumbprint,
+    (state: RootState) => state.certificates.serverCertificateForCommunicationThumbprint,
+    (certificates, serverThumbprint, serverForCommThumbprint): InputItem<CertificatesManagementType>[] => {
+        let ssoCount = 0,
+            clientCount = 0,
+            serverCount = 0;
+
+        certificates.forEach((cert) => {
+            if (cert.Usage === "SsoServer" || cert.Usage === "SsoClient") {
+                ssoCount++;
+            } else if (
+                cert.Thumbprints.includes(serverThumbprint) ||
+                cert.Thumbprints.includes(serverForCommThumbprint)
+            ) {
+                serverCount++;
+            } else {
+                clientCount++;
+            }
+        });
+
+        return [
+            { value: "SSO", label: "SSO", count: ssoCount },
+            { value: "Client", label: "Client", count: clientCount },
+            { value: "Server", label: "Server", count: serverCount },
         ];
     }
 );
@@ -70,8 +107,21 @@ const selectFilteredCertificates = createSelector(
     (state: RootState) => state.certificates.databaseFilter,
     (state: RootState) => state.certificates.clearanceFilter,
     (state: RootState) => state.certificates.stateFilter,
+    (state: RootState) => state.certificates.managementTypeFilter,
     (state: RootState) => state.certificates.sortMode,
-    (certificates, nameOrThumbprintFilter, databaseFilter, clearanceFilter, stateFilter, sortMode) => {
+    (state: RootState) => state.certificates.serverCertificateThumbprint,
+    (state: RootState) => state.certificates.serverCertificateForCommunicationThumbprint,
+    (
+        certificates,
+        nameOrThumbprintFilter,
+        databaseFilter,
+        clearanceFilter,
+        stateFilter,
+        managementTypeFilter,
+        sortMode,
+        serverThumbprint,
+        serverForCommThumbprint
+    ) => {
         const filteredCertificates = certificates.filter((cert) => {
             if (
                 nameOrThumbprintFilter &&
@@ -82,24 +132,46 @@ const selectFilteredCertificates = createSelector(
             }
 
             const permissionKeys = Object.keys(cert.Permissions);
-            if (databaseFilter && permissionKeys.length > 0 && !permissionKeys.includes(databaseFilter)) {
-                return false;
-            }
-
             if (
-                clearanceFilter.length > 0 &&
-                !clearanceFilter.includes(certificatesUtils.getClearance(cert.SecurityClearance))
+                databaseFilter &&
+                permissionKeys.length > 0 &&
+                !permissionKeys.some((x) => DatabaseUtils.namesEqualIgnoreCase(x, databaseFilter))
             ) {
                 return false;
             }
 
-            const state = certificatesUtils.getState(cert.NotAfter);
-            if (stateFilter.includes("Valid") && (state === "Valid" || state === "About to expire")) {
-                return true;
+            const isSso = cert.Usage === "SsoServer" || cert.Usage === "SsoClient";
+
+            if (
+                clearanceFilter.length > 0 &&
+                (cert.Usage === "SsoServer" ||
+                    !clearanceFilter.includes(certificatesUtils.getClearance(cert.SecurityClearance)))
+            ) {
+                return false;
             }
 
-            if (stateFilter.length > 0 && !stateFilter.includes(state)) {
+            const state = certificatesUtils.getState(cert);
+            // About to expire certificates are still valid
+            const matchesStateFilter =
+                stateFilter.includes(state) || (stateFilter.includes("Valid") && state === "About to expire");
+
+            if (stateFilter.length > 0 && !matchesStateFilter) {
                 return false;
+            }
+
+            if (managementTypeFilter.length > 0) {
+                const isServer =
+                    cert.Thumbprints.includes(serverThumbprint) || cert.Thumbprints.includes(serverForCommThumbprint);
+                const isClient = !isServer && !isSso;
+
+                const matchesFilter =
+                    (managementTypeFilter.includes("SSO") && isSso) ||
+                    (managementTypeFilter.includes("Client") && isClient) ||
+                    (managementTypeFilter.includes("Server") && isServer);
+
+                if (!matchesFilter) {
+                    return false;
+                }
             }
 
             return true;
@@ -133,6 +205,26 @@ const selectHasClusterNodeCertificate = createSelector(
     }
 );
 
+const selectSsoServerCertificates = createSelector(
+    (state: RootState) => state.certificates.certificates,
+    (certificates) => certificates.filter((c) => c.Usage === "SsoServer")
+);
+
+const selectSsoUserCertificates = createSelector(
+    (state: RootState) => state.certificates.certificates,
+    (certificates) => certificates.filter((c) => c.Usage === "SsoClient")
+);
+
+const selectHasActiveFilter = createSelector(
+    (state: RootState) => state.certificates.nameOrThumbprintFilter,
+    (state: RootState) => state.certificates.databaseFilter,
+    (state: RootState) => state.certificates.clearanceFilter,
+    (state: RootState) => state.certificates.stateFilter,
+    (state: RootState) => state.certificates.managementTypeFilter,
+    (nameOrThumbprint, database, clearance, state, managementType) =>
+        !!nameOrThumbprint || !!database || clearance.length > 0 || state.length > 0 || managementType.length > 0
+);
+
 export const certificatesSelectors = {
     certificates: (state: RootState) => state.certificates.certificates,
     isInitialLoad: (state: RootState) => state.certificates.isInitialLoad,
@@ -152,10 +244,20 @@ export const certificatesSelectors = {
     clearanceFilterOptions: selectClearanceFilterOptions,
     stateFilter: (state: RootState) => state.certificates.stateFilter,
     stateFilterOptions: selectStateFilterOptions,
+    managementTypeFilter: (state: RootState) => state.certificates.managementTypeFilter,
+    managementTypeFilterOptions: selectManagementTypeFilterOptions,
     sortMode: (state: RootState) => state.certificates.sortMode,
     isGenerateModalOpen: (state: RootState) => state.certificates.isGenerateModalOpen,
     isUploadModalOpen: (state: RootState) => state.certificates.isUploadModalOpen,
     certificateToEdit: (state: RootState) => state.certificates.certificateToEdit,
     certificateToClone: (state: RootState) => state.certificates.certificateToClone,
     isReplaceServerModalOpen: (state: RootState) => state.certificates.isReplaceServerModalOpen,
+    isRegisterSsoServerModalOpen: (state: RootState) => state.certificates.isRegisterSsoServerModalOpen,
+    isRegisterSsoUserModalOpen: (state: RootState) => state.certificates.isRegisterSsoUserModalOpen,
+    ssoUserToEdit: (state: RootState) => state.certificates.ssoUserToEdit,
+    ssoUserToClone: (state: RootState) => state.certificates.ssoUserToClone,
+    ssoServerCertificates: selectSsoServerCertificates,
+    ssoUserCertificates: selectSsoUserCertificates,
+    hasActiveFilter: selectHasActiveFilter,
+    isRenewedModalOpen: (state: RootState) => state.certificates.isRenewedModalOpen,
 };

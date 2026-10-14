@@ -3,6 +3,7 @@ import { SelectOption } from "components/common/select/Select";
 import { loadableData } from "components/models/common";
 import { StoryFn } from "@storybook/react-webpack5";
 import typeUtils = require("common/typeUtils");
+import recentError = require("common/notifications/models/recentError");
 
 export function withPreventDefault(action: (...args: any[]) => void): MouseEventHandler<HTMLElement> {
     return (e: MouseEvent<HTMLElement>) => {
@@ -46,12 +47,40 @@ export function createFailureState(error?: any): loadableData<undefined> {
     };
 }
 
+export function getErrorHeadline(error: string): string {
+    const colonIndex = error.indexOf(":");
+    if (colonIndex === -1) {
+        return error;
+    }
+
+    // only split on ": " when the prefix looks like an exception type (e.g. "System.TimeoutException"),
+    // not e.g. a URL scheme ("http://...") or a message that merely happens to contain a colon
+    const prefix = error.slice(0, colonIndex);
+    const isUriScheme = error.slice(colonIndex, colonIndex + 3) === "://";
+    const looksLikeExceptionType = prefix.length > 0 && !prefix.includes(" ") && !isUriScheme;
+
+    return looksLikeExceptionType ? prefix.trim() : error;
+}
+
+export function getRequestErrorMessage(response: JQueryXHR): string {
+    if (response.statusText === "timeout") {
+        return "Request timed out";
+    }
+
+    const { message, error } = recentError.tryExtractMessageAndException(response.responseText);
+    if (!message) {
+        return response.statusText;
+    }
+
+    return error ? `${message}: ${error}` : message;
+}
+
 export async function delay(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 export function databaseLocationComparator(lhs: databaseLocationSpecifier, rhs: databaseLocationSpecifier) {
-    return lhs.nodeTag === rhs.nodeTag && lhs.shardNumber === rhs.shardNumber;
+    return lhs.nodeTag === rhs.nodeTag && (lhs.shardNumber ?? null) === (rhs.shardNumber ?? null);
 }
 
 export function boundCopy<TArgs>(story: StoryFn<TArgs>, args?: TArgs): StoryFn<TArgs> {
@@ -203,3 +232,7 @@ export const logFilterActionOptions: SelectOption<Sparrow.Logging.LogFilterActio
 );
 
 export const allAiExternalProviders = ["Azure OpenAI", "Google AI", "Ollama", "OpenAI", "Mistral AI"];
+
+export type RecursiveRequired<T> = Required<{
+    [P in keyof T]: T[P] extends object | undefined ? RecursiveRequired<Required<T[P]>> : T[P];
+}>;

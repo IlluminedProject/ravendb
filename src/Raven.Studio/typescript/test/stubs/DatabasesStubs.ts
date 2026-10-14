@@ -1,8 +1,9 @@
-﻿import nonShardedDatabase from "models/resources/nonShardedDatabase";
+import nonShardedDatabase from "models/resources/nonShardedDatabase";
 import shardedDatabase from "models/resources/shardedDatabase";
 import document from "models/database/documents/document";
 import { TimeInSeconds } from "common/constants/timeInSeconds";
 import { RevisionsPreviewResultItem } from "commands/database/documents/getRevisionsPreviewCommand";
+import { ServerWideConnectionStringDto } from "components/pages/database/settings/connectionStrings/store/connectionStringsMapsFromDto";
 import DetailedDatabaseStatistics = Raven.Client.Documents.Operations.DetailedDatabaseStatistics;
 import EssentialDatabaseStatistics = Raven.Client.Documents.Operations.EssentialDatabaseStatistics;
 import StudioDatabaseInfo = Raven.Server.Web.System.Processors.Studio.StudioDatabasesHandlerForGetDatabases.StudioDatabaseInfo;
@@ -15,6 +16,8 @@ import RevisionsConfiguration = Raven.Client.Documents.Operations.Revisions.Revi
 import RevisionsCollectionConfiguration = Raven.Client.Documents.Operations.Revisions.RevisionsCollectionConfiguration;
 import SorterDefinition = Raven.Client.Documents.Queries.Sorting.SorterDefinition;
 import AnalyzerDefinition = Raven.Client.Documents.Indexes.Analysis.AnalyzerDefinition;
+import EtlTaskStats = Raven.Server.Documents.ETL.Stats.EtlTaskStats;
+import TaskErrors = Raven.Server.Documents.TasksErrors.TaskErrors;
 
 export class DatabasesStubs {
     static nonShardedSingleNodeDatabaseDto() {
@@ -441,6 +444,7 @@ export class DatabasesStubs {
         return {
             RavenConnectionStrings: {
                 "raven-name (used by task)": {
+                    UsedBy: [],
                     Type: "Raven",
                     Name: "raven-name (used by task)",
                     Database: "some-db",
@@ -449,6 +453,7 @@ export class DatabasesStubs {
             },
             SqlConnectionStrings: {
                 "sql-name": {
+                    UsedBy: [],
                     Type: "Sql",
                     Name: "sql-name",
                     ConnectionString: "some-connection-string",
@@ -457,6 +462,7 @@ export class DatabasesStubs {
             },
             SnowflakeConnectionStrings: {
                 "snowflake-name": {
+                    UsedBy: [],
                     Type: "Snowflake",
                     Name: "snowflake-name",
                     ConnectionString: "some-snowflake-connection-string",
@@ -464,6 +470,7 @@ export class DatabasesStubs {
             },
             OlapConnectionStrings: {
                 "olap-name": {
+                    UsedBy: [],
                     Type: "Olap",
                     Name: "olap-name",
                     LocalSettings: {
@@ -480,6 +487,7 @@ export class DatabasesStubs {
             },
             ElasticSearchConnectionStrings: {
                 "elasticsearch-name": {
+                    UsedBy: [],
                     Type: "ElasticSearch",
                     Name: "elasticsearch-name",
                     Nodes: ["http://test"],
@@ -493,6 +501,7 @@ export class DatabasesStubs {
             },
             QueueConnectionStrings: {
                 "kafka-name": {
+                    UsedBy: [],
                     Type: "Queue",
                     Name: "kafka-name",
                     BrokerType: "Kafka",
@@ -504,8 +513,10 @@ export class DatabasesStubs {
                     RabbitMqConnectionSettings: null,
                     AzureQueueStorageConnectionSettings: null,
                     AmazonSqsConnectionSettings: null,
+                    AzureServiceBusConnectionSettings: null,
                 },
                 "rabbitmq-name": {
+                    UsedBy: [],
                     Type: "Queue",
                     Name: "rabbitmq-name",
                     BrokerType: "RabbitMq",
@@ -515,8 +526,10 @@ export class DatabasesStubs {
                     },
                     AzureQueueStorageConnectionSettings: null,
                     AmazonSqsConnectionSettings: null,
+                    AzureServiceBusConnectionSettings: null,
                 },
                 "azure-queue-storage-name": {
+                    UsedBy: [],
                     Type: "Queue",
                     Name: "azure-queue-storage-name",
                     BrokerType: "AzureQueueStorage",
@@ -528,8 +541,10 @@ export class DatabasesStubs {
                         Passwordless: null,
                     },
                     AmazonSqsConnectionSettings: null,
+                    AzureServiceBusConnectionSettings: null,
                 },
                 "azure-sqs-name": {
+                    UsedBy: [],
                     Type: "Queue",
                     Name: "azure-sqs-name",
                     BrokerType: "AmazonSqs",
@@ -544,11 +559,29 @@ export class DatabasesStubs {
                         },
                         Passwordless: false,
                     },
+                    AzureServiceBusConnectionSettings: null,
+                },
+                "azure-service-bus-name": {
+                    UsedBy: [],
+                    Type: "Queue",
+                    Name: "azure-service-bus-name",
+                    BrokerType: "AzureServiceBus",
+                    KafkaConnectionSettings: null,
+                    RabbitMqConnectionSettings: null,
+                    AzureQueueStorageConnectionSettings: null,
+                    AmazonSqsConnectionSettings: null,
+                    AzureServiceBusConnectionSettings: {
+                        ConnectionString:
+                            "Endpoint=sb://mynamespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=stub",
+                        EntraId: null,
+                        Passwordless: null,
+                    },
                 },
             },
             AiConnectionStrings: {
                 "ai-name": {
                     Type: "Ai",
+                    UsedBy: [],
                     Name: "ai-name",
                     Identifier: "some-identifier",
                     ModelType: "TextEmbeddings",
@@ -568,6 +601,7 @@ export class DatabasesStubs {
                 },
                 "ai-name-gen-ai": {
                     Type: "Ai",
+                    UsedBy: [],
                     Name: "ai-name-gen-ai",
                     Identifier: "some-identifier",
                     ModelType: "Chat",
@@ -587,6 +621,166 @@ export class DatabasesStubs {
                 },
             },
         };
+    }
+
+    static serverWideConnectionStrings(): ServerWideConnectionStringDto[] {
+        return [
+            {
+                Type: "Raven",
+                UsedBy: [],
+                Name: "sw-raven-name",
+                Database: "some-db",
+                TopologyDiscoveryUrls: ["http://test"],
+                ExcludedDatabases: ["excluded-db"],
+            },
+            {
+                Type: "Sql",
+                UsedBy: [],
+                Name: "sw-sql-name",
+                ConnectionString: "some-connection-string",
+                FactoryName: "System.Data.SqlClient",
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Olap",
+                UsedBy: [],
+                Name: "sw-olap-name",
+                LocalSettings: {
+                    Disabled: false,
+                    GetBackupConfigurationScript: null,
+                    FolderPath: "/bin",
+                },
+                S3Settings: null,
+                AzureSettings: null,
+                GlacierSettings: null,
+                GoogleCloudSettings: null,
+                FtpSettings: null,
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "ElasticSearch",
+                UsedBy: [],
+                Name: "sw-elasticsearch-name",
+                Nodes: ["http://test"],
+                EnableCompatibilityMode: false,
+                Authentication: {
+                    Basic: null,
+                    ApiKey: null,
+                    Certificate: null,
+                },
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Queue",
+                UsedBy: [],
+                Name: "sw-kafka-name",
+                BrokerType: "Kafka",
+                KafkaConnectionSettings: {
+                    BootstrapServers: "test:0",
+                    UseRavenCertificate: false,
+                    ConnectionOptions: {},
+                },
+                RabbitMqConnectionSettings: null,
+                AzureQueueStorageConnectionSettings: null,
+                AmazonSqsConnectionSettings: null,
+                AzureServiceBusConnectionSettings: null,
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Queue",
+                UsedBy: [],
+                Name: "sw-rabbitmq-name",
+                BrokerType: "RabbitMq",
+                KafkaConnectionSettings: null,
+                RabbitMqConnectionSettings: {
+                    ConnectionString: "some-connection-string",
+                },
+                AzureQueueStorageConnectionSettings: null,
+                AmazonSqsConnectionSettings: null,
+                AzureServiceBusConnectionSettings: null,
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Snowflake",
+                UsedBy: [],
+                Name: "sw-snowflake-name",
+                ConnectionString: "some-snowflake-connection-string",
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Queue",
+                UsedBy: [],
+                Name: "sw-azure-queue-storage-name",
+                BrokerType: "AzureQueueStorage",
+                KafkaConnectionSettings: null,
+                RabbitMqConnectionSettings: null,
+                AzureQueueStorageConnectionSettings: {
+                    ConnectionString: "some-connection-string",
+                    EntraId: null,
+                    Passwordless: null,
+                },
+                AmazonSqsConnectionSettings: null,
+                AzureServiceBusConnectionSettings: null,
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Queue",
+                UsedBy: [],
+                Name: "sw-amazon-sqs-name",
+                BrokerType: "AmazonSqs",
+                KafkaConnectionSettings: null,
+                RabbitMqConnectionSettings: null,
+                AzureQueueStorageConnectionSettings: null,
+                AmazonSqsConnectionSettings: {
+                    Basic: {
+                        AccessKey: "AKIA123",
+                        SecretKey: "this is secret",
+                        RegionName: "us-west-2",
+                    },
+                    Passwordless: false,
+                },
+                AzureServiceBusConnectionSettings: null,
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Queue",
+                UsedBy: [],
+                Name: "azure-service-bus-name",
+                BrokerType: "AzureServiceBus",
+                KafkaConnectionSettings: null,
+                RabbitMqConnectionSettings: null,
+                AzureQueueStorageConnectionSettings: null,
+                AmazonSqsConnectionSettings: null,
+                AzureServiceBusConnectionSettings: {
+                    ConnectionString:
+                        "Endpoint=sb://mynamespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=stub",
+                    EntraId: null,
+                    Passwordless: null,
+                },
+                ExcludedDatabases: [],
+            },
+            {
+                Type: "Ai",
+                UsedBy: [],
+                Name: "sw-ai-name",
+                Identifier: "some-identifier",
+                ModelType: "TextEmbeddings",
+                GoogleSettings: {
+                    ApiKey: "some-api-key",
+                    Endpoint: "https://generativelanguage.googleapis.com",
+                    Model: "some-model",
+                    AiVersion: "V1",
+                },
+                AzureOpenAiSettings: null,
+                HuggingFaceSettings: null,
+                OllamaSettings: null,
+                EmbeddedSettings: null,
+                OpenAiSettings: null,
+                MistralAiSettings: null,
+                VertexSettings: null,
+                ExcludedDatabases: [],
+            },
+        ];
     }
 
     static nodeConnectionTestErrorResult(): Raven.Server.Web.System.NodeConnectionTestResult {
@@ -1020,6 +1214,43 @@ return docs[0];`,
         };
     }
 
+    static documentsPreviewColumns(): string[] {
+        return ["Company", "Freight", "OrderedAt", "ShipTo", "Lines", "__metadata"];
+    }
+
+    static documentsPreviewItems(skip: number, count: number, collectionName = "Orders"): document[] {
+        return Array.from({ length: count }, (_, i) => {
+            const index = skip + i;
+
+            return new document({
+                "@metadata": {
+                    "@id": `${collectionName.toLowerCase()}/${index + 1}-A`,
+                    "@collection": collectionName,
+                    "@change-vector": `A:${index + 1}-F9I6Egqwm0Kz+K0oFVIR9Q`,
+                    "@last-modified": "2024-01-01T12:00:00.0000000Z",
+                    "@flags": index % 2 === 0 ? "HasRevisions" : "",
+                },
+                Company: `companies/${(index % 10) + 1}-A`,
+                Freight: index * 1.5,
+                OrderedAt: "2024-01-01T00:00:00.0000000",
+                ShipTo: { City: "Reims", Country: "France" },
+                Lines: [],
+            });
+        });
+    }
+
+    static documentsPreview(): pagedResultWithAvailableColumns<document> {
+        const items = DatabasesStubs.documentsPreviewItems(0, 5);
+
+        return {
+            items,
+            totalResultCount: items.length,
+            availableColumns: DatabasesStubs.documentsPreviewColumns(),
+            continuationToken: null,
+            resultEtag: "1",
+        };
+    }
+
     static revisionsPreview(): pagedResultWithToken<RevisionsPreviewResultItem> {
         return {
             items: [
@@ -1071,6 +1302,7 @@ return docs[0];`,
                     AwsRegionName: "eu-central-1",
                     CustomServerUrl: "",
                     ForcePathStyle: false,
+                    DisableChecksumValidation: false,
                     RemoteFolderName: "",
                 },
                 AzureSettings: {
@@ -1084,6 +1316,15 @@ return docs[0];`,
         }
 
         return destinations;
+    }
+
+    static remoteAttachmentsStudioConfiguration(): RemoteAttachmentsStudioConfiguration {
+        return {
+            Disabled: false,
+            Destinations: {
+                "s3-main": { Disabled: false },
+            },
+        };
     }
 
     static remoteAttachmentsConfiguration(): Raven.Client.Documents.Attachments.RemoteAttachmentsConfiguration {
@@ -1276,5 +1517,82 @@ return docs[0];`,
             LastStatus: "Ok",
             LastError: null,
         };
+    }
+
+    static taskErrors(): TaskErrors[] {
+        return [
+            {
+                Category: "Etl",
+                ProcessErrors: [],
+                EtlSubType: null,
+                ItemErrors: [
+                    {
+                        TaskName: "ETL1/Transformation1",
+                        CreatedAt: "2026-03-09T09:52:12.6923003",
+                        Step: "Transformation",
+                        Error: 'Raven.Client.Exceptions.Documents.Patching.JavaScriptException: At 11:6 Script failed for document ID \'\'. {"message":"dummy error","stack":"   at call :6:12\\r\\n   at execute (doc, args) :13:5\\r\\n   at :15:1"}\r\n ---> Jint.Runtime.JavaScriptException: dummy error\r\n ---> Error: dummy error\r\n   at call :6:12\r\n   at execute (doc, args) :13:5\r\n   at :15:1\r\n   --- End of inner exception stack trace ---\r\n   at Jint.Runtime.ExceptionHelper.ThrowJavaScriptException(Engine engine, JsValue value, Completion& result)\r\n   at Jint.Native.Function.ScriptFunction.Call(JsValue thisObject, JsValue[] arguments)\r\n   at Jint.Engine.Call(Function function, JsValue thisObject, JsValue[] arguments, JintExpression expression)\r\n   at Jint.Engine.<>c__DisplayClass135_0.<Call>g__Callback|0()\r\n   at Jint.Engine.ExecuteWithConstraints[T](Boolean strict, Func`1 callback)\r\n   at Jint.Engine.Call(JsValue callable, JsValue thisObject, JsValue[] arguments)\r\n   at Raven.Server.Documents.Patch.ScriptRunner.SingleRun.Run(JsonOperationContext jsonCtx, DocumentsOperationContext docCtx, String method, String documentId, Object[] args, QueryTimingsScope scope, CancellationToken token)\r\n   --- End of inner exception stack trace ---\r\n   at Raven.Server.Documents.Patch.ScriptRunner.SingleRun.Run(JsonOperationContext jsonCtx, DocumentsOperationContext docCtx, String method, String documentId, Object[] args, QueryTimingsScope scope, CancellationToken token)\r\n   at Raven.Server.Documents.Patch.ScriptRunner.SingleRun.Run(JsonOperationContext jsonCtx, DocumentsOperationContext docCtx, String method, Object[] args, QueryTimingsScope scope, CancellationToken token)\r\n   at Raven.Server.Documents.ETL.Providers.Raven.RavenEtlDocumentTransformer.Transform(RavenEtlItem item, EtlStatsScope stats, EtlProcessState state)\r\n   at Raven.Server.Documents.ETL.EtlProcess`6.Transform(IEnumerable`1 items, DocumentsOperationContext context, TStatsScope stats, EtlProcessState state)',
+                        DocumentId: "users/1000-A",
+                    },
+                ],
+                TaskName: "ETL1/Transformation1",
+            },
+            {
+                Category: "CdcSink",
+                EtlSubType: null,
+                TaskName: "CdcSink1",
+                ProcessErrors: [
+                    {
+                        TaskName: "CdcSink1",
+                        CreatedAt: "2026-03-09T09:52:12.6923003",
+                        Step: "Configuration",
+                        Error: "dummy error",
+                        AffectedDocumentsCount: 0,
+                    },
+                ],
+                ItemErrors: [
+                    {
+                        TaskName: "CdcSink1",
+                        CreatedAt: "2026-03-09T09:52:12.6923003",
+                        Step: "Load",
+                        Error: "dummy error",
+                        DocumentId: "orders/1-A",
+                    },
+                ],
+            },
+        ];
+    }
+
+    static etlStats(): EtlTaskStats[] {
+        return [
+            {
+                TaskName: "ETL1",
+                NodeTag: "A",
+                Stats: [
+                    {
+                        TransformationName: "Transformation1",
+                        Statistics: {
+                            LastLoadErrorTime: null,
+                            LastProcessedEtag: 0,
+                            TransformationSuccesses: 0,
+                            TransformationErrors: 1000,
+                            LoadSuccesses: 0,
+                            LoadErrors: 0,
+                            LoadSuccessesInCurrentBatch: 0,
+                            AverageErrorsRatio: {},
+                            HealthStatus: "Failed",
+                            NextBatchRetryTime: null,
+                            LastSuccessfulBatchTime: null,
+                            BatchStopReason: null,
+                            LastChangeVector: null,
+                            LastSlowSqlWarningsInCurrentBatch: null,
+                            WasLatestLoadSuccessful: false,
+                        },
+                    },
+                ],
+                EtlType: "Raven",
+                TaskId: 1,
+                EtlSubType: null,
+            },
+        ];
     }
 }

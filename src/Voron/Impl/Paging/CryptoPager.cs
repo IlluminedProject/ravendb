@@ -231,9 +231,7 @@ namespace Voron.Impl.Paging
 
             buffer = GetBufferAndAddToTxState(pageNumber, state, numberOfPages);
 
-            var toCopy = numberOfPages * Constants.Storage.PageSize;
-
-            AssertCopyWontExceedPagerFile(toCopy, pageNumber);
+            var toCopy = numberOfPages * (long)Constants.Storage.PageSize;
 
             Memory.Copy(buffer.Pointer, pagePointer, toCopy);
 
@@ -274,18 +272,9 @@ namespace Voron.Impl.Paging
             {
                 state.RemoveBuffer(page);
                 ReturnBuffer(buffer);
-            }
-        }
 
-        [Conditional("DEBUG")]
-        private void AssertCopyWontExceedPagerFile(int toCopy, long startPageNumberToCopy)
-        {
-            long toCopyInPages = checked(toCopy / Constants.Storage.PageSize + (toCopy % Constants.Storage.PageSize == 0 ? 0 : 1));
-
-            if (startPageNumberToCopy + toCopyInPages > NumberOfAllocatedPages)
-            {
-                throw new InvalidOperationException(
-                    $"Copying encrypted page exceeded the page file size. Number of allocated pages is {NumberOfAllocatedPages} while it attempted to access page {startPageNumberToCopy} and copy {toCopy} bytes");
+                if (tx is LowLevelTransaction llt)
+                    llt._pageLocator.Reset(page);
             }
         }
 
@@ -389,8 +378,7 @@ namespace Voron.Impl.Paging
                 pageHeader->OverflowSize != bufferPointer->OverflowSize)
                 throw new InvalidOperationException($"The header of {pageNumber} was modified, but it was *not* changed in this transaction!");
 
-            var toCopy = numberOfPages * Constants.Storage.PageSize;
-            AssertCopyWontExceedPagerFile(toCopy, pageNumber);
+            var toCopy = numberOfPages * (long)Constants.Storage.PageSize;
 
             ulong currentHash = Hashing.XXHash64.Calculate(buffer.Pointer, (ulong)toCopy);
 

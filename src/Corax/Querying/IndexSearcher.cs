@@ -9,6 +9,7 @@ using Corax.Mappings;
 using Corax.Pipeline;
 using Corax.Querying.Matches;
 using Corax.Querying.Matches.Meta;
+using Corax.Querying.Matches.SortingMatches.Meta;
 using Corax.Querying.Matches.TermProviders;
 using Corax.Utils;
 using Sparrow;
@@ -31,10 +32,18 @@ namespace Corax.Querying;
 public sealed unsafe partial class IndexSearcher : IDisposable
 {
     internal static readonly long BitmapMemoryRequiredThresholdInBytes = new Size(32, SizeUnit.Megabytes).GetValue(SizeUnit.Bytes);
+
+    private const long BitmapAndFillDensityDivisor = 256;
+    private const long BitmapOrFillDensityDivisor = 32;
+    internal const int BitmapAndFillSingleBatchThreshold = 4096;
+    internal const int BitmapDrainBufferSize = 4096;
+    
     internal readonly Transaction _transaction;
     private Dictionary<string, Slice> _dynamicFieldNameMapping;
 
     private readonly IndexFieldsMapping _fieldMapping;
+    private Dictionary<Slice, Hnsw.SearchState> _vectorSearchStateCache;
+    private Dictionary<Slice, HnswIndexCache> _vectorNodeCaches;
     private HashSet<long> _nullTermsMarkers;
     private HashSet<long> _nonExistingTermsMarkers;
     private long[] _vectorFieldsMarkers;
@@ -113,7 +122,39 @@ public sealed unsafe partial class IndexSearcher : IDisposable
 
     public bool DocumentsAreBoosted => GetDocumentBoostTree().NumberOfEntries > 0;
 
-    
+    public BitmapAndFillMode BitmapAndFillMode = BitmapAndFillMode.Auto;
+
+    // Heuristic: we will use streaming mechanism when one side is small. However, when we don't know - we will risk it and use bitmap
+    // because penalty for using bitmap is constant, and if inner is big we can pay a lot of more in term of performance.
+    internal bool BitmapSideQualifies(long count, QueryCountConfidence confidence)
+    {
+        return confidence != QueryCountConfidence.High || count >= (LastEntryId + 1) / BitmapAndFillDensityDivisor;
+    }
+
+    internal bool BitmapOrQualifies(long innerCount, QueryCountConfidence innerConfidence, long outerCount, QueryCountConfidence outerConfidence)
+    {
+        var trusted = 0L;
+        if (innerConfidence == QueryCountConfidence.High)
+            trusted += innerCount;
+        if (outerConfidence == QueryCountConfidence.High)
+            trusted += outerCount;
+
+        var anyUnknown = innerConfidence != QueryCountConfidence.High || outerConfidence != QueryCountConfidence.High;
+        var divisor = anyUnknown ? BitmapOrFillDensityDivisor * 2 : BitmapOrFillDensityDivisor;
+        return trusted >= (LastEntryId + 1) / divisor;
+    }
+
+    internal bool BitmapMemoryFits(int bitmaps)
+    {
+        // The budget is the memoization limit ('Indexing.Corax.MaxMemoizationSizeInMb', scales with
+        // the machine): the bitmap route replaces what the classic fill would otherwise memoize, and
+        // a node's bitmaps (id-space-sized, LastEntryId/8 bytes each, known upfront) are usually
+        // smaller than that result-sized buffer. Over budget nothing fails - unlike memoization -
+        // the query just stays on the classic fill.
+        var wordsPerBitmap = (LastEntryId + 1 + 63) / 64;
+        return bitmaps * wordsPerBitmap * sizeof(ulong) <= MaxMemoizationSizeInBytes;
+    }
+
     // The reason why we want to have the transaction open for us is so that we avoid having
     // to explicitly provide the index searcher with opening semantics and also every new
     // searcher becomes essentially a unit of work which makes reusing assets tracking more explicit.
@@ -344,6 +385,45 @@ public sealed unsafe partial class IndexSearcher : IDisposable
         return termAmount;
     }
 
+    /// <summary>Whether a scan of the sort field's value tree, plus nulls and non-existing, reaches every entry.
+    /// False for a mixed-type field: the scan would skip the entries holding the other types (RavenDB-27035).</summary>
+    public bool SortFieldTreeCoversAllEntries(in FieldMetadata field, MatchCompareFieldType fieldType)
+    {
+        // a value of any type also writes a textual term, and null and non-existing are terms of their own, so this
+        // tree has a row for every entry the sequence scan reaches
+        if (fieldType == MatchCompareFieldType.Sequence)
+            return (EntriesToTermsReader(field.FieldName)?.NumberOfEntries ?? 0) >= NumberOfEntries;
+
+        Slice treeName;
+        switch (fieldType)
+        {
+            case MatchCompareFieldType.Integer:
+                IndexFieldsMappingBuilder.GetFieldNameForLongs(Allocator, field.FieldName, out treeName);
+                break;
+            case MatchCompareFieldType.Floating:
+                IndexFieldsMappingBuilder.GetFieldNameForDoubles(Allocator, field.FieldName, out treeName);
+                break;
+            default:
+                return false;
+        }
+
+        // only an entry holding several values for the field can sit in the value tree and in a marker list at once,
+        // so the three counts below are disjoint exactly when the field holds none
+        if (HasMultipleTermsInField(field))
+            return false;
+
+        // entries -> terms is keyed by entry id, so its count is the number of entries with a value in that tree
+        long covered = EntriesToTermsReader(treeName)?.NumberOfEntries ?? 0;
+
+        if (TryGetPostingListForNull(field, out var nullPostingListId))
+            covered += GetPostingList(nullPostingListId)?.State.NumberOfEntries ?? 0;
+
+        if (TryGetPostingListForNonExisting(field, out var nonExistingPostingListId))
+            covered += GetPostingList(nonExistingPostingListId)?.State.NumberOfEntries ?? 0;
+
+        return covered >= NumberOfEntries;
+    }
+
     public bool TryGetTermsOfField(in FieldMetadata field, out ExistsTermProvider<Lookup<CompactKeyLookup>.ForwardIterator> existsTermProvider)
     {
         return TryGetTermsOfField<Lookup<CompactKeyLookup>.ForwardIterator>(field, out existsTermProvider);
@@ -480,8 +560,50 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     }
 
     
+    /// <summary>
+    /// Returns a shared SearchState for the given vector field, creating one if needed.
+    /// The SearchState is cached per field name and disposed when the IndexSearcher is disposed.
+    /// This lets multiple vector search operations against the same field share loaded
+    /// node topology and vector pointers. The distance cache is keyed by the query vector
+    /// (see <see cref="Hnsw.SearchState.OnQueryVector"/>): sub-searches with distinct vectors
+    /// see independent caches, while same-vector re-entry (e.g. eF re-expansion in filtered
+    /// search) keeps its cached distances.
+    /// </summary>
+    internal Hnsw.SearchState GetOrCreateVectorSearchState(Slice fieldName)
+    {
+        _vectorSearchStateCache ??= new(SliceComparer.Instance);
+        ref var state = ref CollectionsMarshal.GetValueRefOrAddDefault(_vectorSearchStateCache, fieldName, out bool exists);
+        if (exists == false)
+        {
+            // Look for a shared HnswIndexCache for this field
+            HnswIndexCache nodeCache = null;
+            _vectorNodeCaches?.TryGetValue(fieldName, out nodeCache);
+            state = new Hnsw.SearchState(_transaction.LowLevelTransaction, fieldName, nodeCache);
+        }
+        return state;
+    }
+
+    /// <summary>
+    /// Attach a per-field dictionary of HNSW node caches to this IndexSearcher. Each
+    /// SearchState created by <see cref="GetOrCreateVectorSearchState"/> looks up its field's
+    /// cache here and uses it for node lookups instead of reading them through Voron.
+    /// The dictionary is read by query code only and must not be mutated while the
+    /// IndexSearcher is alive.
+    /// </summary>
+    public void AttachVectorNodeCaches(Dictionary<Slice, HnswIndexCache> caches)
+    {
+        _vectorNodeCaches = caches;
+    }
+
     public void Dispose()
     {
+        if (_vectorSearchStateCache != null)
+        {
+            foreach (var kvp in _vectorSearchStateCache)
+                kvp.Value.Dispose();
+            _vectorSearchStateCache = null;
+        }
+
         if (_ownsTransaction)
             _transaction?.Dispose();
 
@@ -580,17 +702,17 @@ public sealed unsafe partial class IndexSearcher : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public IncludeNullMatch<TInner> IncludeNullMatch<TInner>(in FieldMetadata field, in TInner inner, bool forward, bool nullFirsts)
+    public IncludeNullMatch<TInner> IncludeNullMatch<TInner>(in FieldMetadata field, in TInner inner, bool forward, bool nullIsSmallest)
         where TInner : IQueryMatch
     {
-        return new IncludeNullMatch<TInner>(this, inner, field, forward, nullFirsts);
+        return new IncludeNullMatch<TInner>(this, inner, field, forward, nullIsSmallest);
     }
     
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public IncludeNonExistingMatch<TInner> IncludeNonExistingMatch<TInner>(in FieldMetadata field, in TInner inner, bool forward, bool nullFirsts)
+    public IncludeNonExistingMatch<TInner> IncludeNonExistingMatch<TInner>(in FieldMetadata field, in TInner inner, bool forward, bool nullIsSmallest)
         where TInner : IQueryMatch
     {
-        return new IncludeNonExistingMatch<TInner>(this, inner, field, forward, nullFirsts);
+        return new IncludeNonExistingMatch<TInner>(this, inner, field, forward, nullIsSmallest);
     }
 
     public DeduplicationMatch<TInner> DeduplicationMatch<TInner>(in TInner inner, bool forceHashset = false) 

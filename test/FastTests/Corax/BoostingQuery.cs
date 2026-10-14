@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -51,8 +51,10 @@ namespace FastTests.Corax
             }
         }
 
-        [RavenFact(RavenTestCategory.Corax)]
-        public void OrBoosting()
+        [RavenTheory(RavenTestCategory.Corax)]
+        [InlineData(BitmapAndFillMode.Off)]
+        [InlineData(BitmapAndFillMode.Force)]
+        public void OrBoosting(BitmapAndFillMode bitmapAndFillMode)
         {
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/1", Content1 = 1}); //  2 * 10
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/11", Content1 = 0}); //  2 
@@ -62,14 +64,14 @@ namespace FastTests.Corax
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/3", Content1 = 2});
 
             IndexEntries();
-            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator));
+            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator)) { BitmapAndFillMode = bitmapAndFillMode };
             {
                 var startWithMatch = searcher.StartWithQuery(searcher.FieldMetadataBuilder("Id", hasBoost: true), "list/1");
                 var boostedStartWithMatch = searcher.Boost(startWithMatch, 2);
                 var contentMatch = searcher.TermQuery(searcher.FieldMetadataBuilder("Content1", hasBoost: true), "1");
                 var orMatch = searcher.Or(boostedStartWithMatch, contentMatch);
                 var boostedOrMatch = searcher.Boost(orMatch, 10);
-                var orderByScore = searcher.OrderBy(boostedOrMatch, new OrderMetadata(true, MatchCompareFieldType.Score), nullFirst: true);
+                var orderByScore = searcher.OrderBy(boostedOrMatch, new OrderMetadata(true, MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
                 Span<long> ids = stackalloc long[2048];
                 int read = orderByScore.Fill(ids);
                 ids = ids.Slice(0, read);
@@ -106,7 +108,7 @@ namespace FastTests.Corax
                     searcher.InQuery(contentMetadata, new() {"1", "2", "3"})
                     , 10);
 
-                match = searcher.OrderBy(match,new OrderMetadata(true, MatchCompareFieldType.Score), nullFirst: true);
+                match = searcher.OrderBy(match,new OrderMetadata(true, MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
                 Span<long> ids = stackalloc long[amount];
                 var read = match.Fill(ids);
                 List<string> result = new();
@@ -126,8 +128,10 @@ namespace FastTests.Corax
             }
         }
         
-        [RavenFact(RavenTestCategory.Corax)]
-        public void OrderByBoosting()
+        [RavenTheory(RavenTestCategory.Corax)]
+        [InlineData(BitmapAndFillMode.Off)]
+        [InlineData(BitmapAndFillMode.Force)]
+        public void OrderByBoosting(BitmapAndFillMode bitmapAndFillMode)
         {
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/1", Content1 = 1}); // 2 * 10
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/11", Content1 = 0}); // 2 * 10
@@ -137,7 +141,7 @@ namespace FastTests.Corax
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/3", Content1 = 2}); //      0
 
             IndexEntries();
-            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator));
+            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator)) { BitmapAndFillMode = bitmapAndFillMode };
             {
                 var startWithMatch = searcher.StartWithQuery("Id", "list/1", hasBoost: true);
                 var boostedStartWithMatch = searcher.Boost(startWithMatch, 2);
@@ -146,7 +150,7 @@ namespace FastTests.Corax
                 var boostedOrMatch = searcher.Boost(orMatch, 10);
                 var contentMatch2 = searcher.TermQuery("Content1", "2", hasBoost: true);
                 var orMatch2 = searcher.Or(contentMatch2, boostedOrMatch);
-                var sortedMatch = searcher.OrderBy(orMatch2, new OrderMetadata(true, MatchCompareFieldType.Score), nullFirst: true);
+                var sortedMatch = searcher.OrderBy(orMatch2, new OrderMetadata(true, MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
 
                 Span<long> ids = stackalloc long[2048];
                 int read = sortedMatch.Fill(ids);
@@ -165,8 +169,10 @@ namespace FastTests.Corax
         }
 
 
-        [RavenFact(RavenTestCategory.Corax)]
-        public void OrderByBoostingTake4()
+        [RavenTheory(RavenTestCategory.Corax)]
+        [InlineData(BitmapAndFillMode.Off)]
+        [InlineData(BitmapAndFillMode.Force)]
+        public void OrderByBoostingTake4(BitmapAndFillMode bitmapAndFillMode)
         {
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/1", Content1 = 1}); // 2 * 10
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/11", Content1 = 0}); // 2 * 10
@@ -176,7 +182,7 @@ namespace FastTests.Corax
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/3", Content1 = 2}); //      0
 
             IndexEntries();
-            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator));
+            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator)) { BitmapAndFillMode = bitmapAndFillMode };
             {
                 var startWithMatch = searcher.StartWithQuery("Id", "list/1", hasBoost: true);
                 var boostedStartWithMatch = searcher.Boost(startWithMatch, 2);
@@ -185,7 +191,7 @@ namespace FastTests.Corax
                 var boostedOrMatch = searcher.Boost(orMatch, 10);
                 var contentMatch2 = searcher.TermQuery("Content1", "2", hasBoost: true);
                 var orMatch2 = searcher.Or(contentMatch2, boostedOrMatch);
-                var sortedMatch = searcher.OrderBy(orMatch2, new OrderMetadata(true, MatchCompareFieldType.Score), nullFirst: true, 4);
+                var sortedMatch = searcher.OrderBy(orMatch2, new OrderMetadata(true, MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest, 4);
 
                 // TODO: Check what happens in OrderBy statements when the buffer is too small. 
                 Span<long> ids = stackalloc long[1024];
@@ -209,8 +215,10 @@ namespace FastTests.Corax
             return value1.Content1.CompareTo(value2.Content1);
         }
 
-        [RavenFact(RavenTestCategory.Corax)]
-        public void OrderByBoostingTermFrequency()
+        [RavenTheory(RavenTestCategory.Corax)]
+        [InlineData(BitmapAndFillMode.Off)]
+        [InlineData(BitmapAndFillMode.Force)]
+        public void OrderByBoostingTermFrequency(BitmapAndFillMode bitmapAndFillMode)
         {
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/1", Content1 = 0}); // 1/2
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/2", Content1 = 0}); // 1/2
@@ -220,7 +228,7 @@ namespace FastTests.Corax
             longList.Add(new IndexSingleNumericalEntry<long, long> {Id = $"list/6", Content1 = 1}); // 1/4            
 
             IndexEntries();
-            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator));
+            using var searcher = new IndexSearcher(Env, CreateKnownFields(Allocator)) { BitmapAndFillMode = bitmapAndFillMode };
             {
                 var content0Match = searcher.TermQuery("Content1", "0", hasBoost: true);
                 var boostedContent0 = searcher.Boost(content0Match, 1);
@@ -230,7 +238,7 @@ namespace FastTests.Corax
 
                 var orMatch = searcher.Or(boostedContent0, boostedContent1);
                 var boostedOrMatch = searcher.Boost(orMatch, 10);
-                var sortedMatch = searcher.OrderBy(boostedOrMatch,new OrderMetadata(true,MatchCompareFieldType.Score), nullFirst: true);
+                var sortedMatch = searcher.OrderBy(boostedOrMatch,new OrderMetadata(true,MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
 
                 Span<long> ids = stackalloc long[1024];
                 var read = sortedMatch.Fill(ids);
@@ -274,7 +282,7 @@ namespace FastTests.Corax
             var contentMetadata = searcher.FieldMetadataBuilder("Content1", hasBoost: true);
             {
                 var query = searcher.OrderBy(searcher.InQuery(contentMetadata, new List<string>() {"0", "1"})
-                    ,new OrderMetadata(true,MatchCompareFieldType.Score), nullFirst: true);
+                    ,new OrderMetadata(true,MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
 
                 Span<long> ids = stackalloc long[1024];
                 var read = query.Fill(ids);
@@ -356,7 +364,7 @@ namespace FastTests.Corax
             var contentMetadata = searcher.FieldMetadataBuilder("Content1", Content1, hasBoost: true);
             {
                 var query = searcher.InQuery(contentMetadata, new List<string>() {"0", "1", "2", "3"});
-                var sortedMatch = searcher.OrderBy(query,new OrderMetadata(true,MatchCompareFieldType.Score), nullFirst: true);
+                var sortedMatch = searcher.OrderBy(query,new OrderMetadata(true,MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
 
                 Span<long> ids = stackalloc long[1024];
                 var read = sortedMatch.Fill(ids);

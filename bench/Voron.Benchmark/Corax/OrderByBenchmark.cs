@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -60,7 +60,7 @@ namespace Voron.Benchmark.Corax
                 {
                     Environment =
                     {
-                        Runtime = CoreRuntime.Core80,
+                        Runtime = CoreRuntime.Core10_0,
                         Platform = BenchmarkDotNet.Environments.Platform.X64,
                         Jit = Jit.RyuJit
                     },
@@ -242,7 +242,7 @@ namespace Voron.Benchmark.Corax
             var ageField = FieldMetadata.Build(_ageSlice, default, 2, default, default);
             var ageTerm = _indexSearcher.StartWithQuery(ageField, _ageValueSlice);
             var andQuery = _indexSearcher.And(typeTerm, ageTerm);
-            var query = _indexSearcher.OrderBy(andQuery, new OrderMetadata(ageField, true, MatchCompareFieldType.Sequence, fieldHasNoTerms: false), nullFirst: true, take: TakeSize);           
+            var query = _indexSearcher.OrderBy(andQuery, new OrderMetadata(ageField, true, MatchCompareFieldType.Sequence, fieldHasNoTerms: false), defaultNullsSortMode: NullsSortMode.NullsSmallest, take: TakeSize);           
 
             Span<long> ids = _ids;
             while (query.Fill(ids) != 0)

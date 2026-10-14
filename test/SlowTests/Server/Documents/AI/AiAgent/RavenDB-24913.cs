@@ -22,7 +22,7 @@ public class RavenDB_24913(ITestOutputHelper output) : RavenTestBase(output)
     private record Reply(string Answer);
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task CanProvideInitialContextToQuery(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -47,7 +47,7 @@ public class RavenDB_24913(ITestOutputHelper output) : RavenTestBase(output)
     }
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task CanProvideInitialContextToQueryWithStreaming(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -77,7 +77,7 @@ public class RavenDB_24913(ITestOutputHelper output) : RavenTestBase(output)
             new AiConversationCreationOptions()
                 .AddParameter("username", "ayende"));
 
-        chat.SetUserPrompt("What is my name?");
+        chat.SetUserPrompt("What is my full name?");
         var result = await chat.RunAsync<Reply>();
         Assert.Contains("Oren", result.Answer.Answer);
         Assert.Contains("Eini", result.Answer.Answer);

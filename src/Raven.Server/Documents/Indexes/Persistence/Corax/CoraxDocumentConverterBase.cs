@@ -30,6 +30,7 @@ using Raven.Client.Documents.Indexes.Vector;
 using Raven.Server.Config;
 using Raven.Server.Documents.Indexes.VectorSearch;
 using Sparrow.Binary;
+using Voron;
 using static Raven.Server.Config.Categories.IndexingConfiguration;
 
 namespace Raven.Server.Documents.Indexes.Persistence.Corax;
@@ -40,6 +41,12 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
 
     private readonly bool _canContainSourceDocumentId;
     private readonly bool _legacyHandlingOfComplexFields;
+    private readonly bool _charAsString;
+
+    // RavenDB-26831: XOR mask applied to raw signed longs before writing them big-endian into a compound field,
+    // so byte order matches numeric order. long.MinValue flips the sign bit (order-preserving) for fixed indexes;
+    // 0 keeps the legacy (non-order-preserving) encoding for indexes created before the milestone.
+    private readonly long _compoundFieldNumericXorMask;
     private static ReadOnlySpan<byte> TrueLiteral => "true"u8;
     private static ReadOnlySpan<byte> FalseLiteral => "false"u8;
 
@@ -76,6 +83,10 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
         using var _ = Scope; // ensure that we release all the resources generated in SetDocumentFields
         var currentIndexingScope = CurrentIndexingScope.Current;
 
+        // The previous document may have bailed out before its 'non existing' markers were written (no indexed field
+        // at all, or an exception) - the fields it registered as missing must not leak into this one.
+        _nonExistingFieldsOfDocument.Clear();
+
         return SetDocumentFields(key, sourceDocumentId, doc, indexContext, builder, currentIndexingScope?.Source);
     }
     
@@ -84,6 +95,10 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
     {
         _canContainSourceDocumentId = canContainSourceDocumentId;
         _legacyHandlingOfComplexFields = _index.Definition.Version < IndexDefinitionBaseServerSide.IndexVersion.CoraxComplexFieldIndexingBehavior;
+        _charAsString = IndexDefinitionBaseServerSide.IndexVersion.IsCoraxCharAsStringSupported(_index.Definition.Version);
+        _compoundFieldNumericXorMask = _index.Definition.Version >= IndexDefinitionBaseServerSide.IndexVersion.CoraxOrderPreservingCompoundNumericEncoding
+            ? long.MinValue
+            : 0L;
 
         Allocator = new ByteStringContext(SharedMultipleUseFlag.None);
         
@@ -117,6 +132,25 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
     
     public IndexFieldsMapping GetKnownFieldsForQuerying() => _knownFieldsForReaders.Value;
 
+    /// <summary>
+    /// Returns the field-name slices (Voron tree names) of the index's vector fields, allocated on the converter's
+    /// long-lived <see cref="Allocator"/>.
+    /// </summary>
+    internal List<Slice> GetVectorFieldNames()
+    {
+        List<Slice> result = null;
+        foreach (var field in _index.Definition.IndexFields.Values)
+        {
+            if (field.Vector is null || field.Id == CoraxConstants.IndexWriter.DynamicField)
+                continue;
+
+            Slice.From(Allocator, field.Name, ByteStringType.Immutable, out var fieldName);
+            (result ??= new List<Slice>()).Add(fieldName);
+        }
+
+        return result;
+    }
+
     private IndexFieldsMapping CreateKnownFieldsForWriter()
     {
         if (KnownFieldsForWriter == null)
@@ -141,7 +175,7 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
     }
 
     [SkipLocalsInit]
-    protected void InsertRegularField<TBuilder>(IndexField field, object value, JsonOperationContext indexContext, TBuilder builder, object sourceDocument,
+    protected unsafe void InsertRegularField<TBuilder>(IndexField field, object value, JsonOperationContext indexContext, TBuilder builder, object sourceDocument,
         out bool shouldSkip)
         where TBuilder : IIndexEntryBuilder
     {
@@ -221,6 +255,9 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
                 break;
 
             case ValueType.Char:
+                if (_charAsString)
+                    goto case ValueType.Enum;
+
                 unsafe
                 {
                     char item = (char)value;
@@ -628,7 +665,6 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
             }
             case ValueType.LazyString:
                 var lazyStringValue = ((LazyStringValue)v);
-                EnsureHasSpace(lazyStringValue.Length);
                 index += AppendAnalyzedTerm(lazyStringValue.AsSpan());
                 break;
             case ValueType.LazyCompressedString:
@@ -671,6 +707,9 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
                 AppendLong(l);
                 break;
             case ValueType.Char:
+                if (_charAsString)
+                    goto case ValueType.String;
+
                 unsafe
                 {
                     char value = (char)v;
@@ -690,7 +729,7 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
                     decimal m => (double)m,
                     _ => Convert.ToDouble(v)
                 };
-                AppendLong(Bits.DoubleToSortableLong(d));
+                AppendSortableLong(Bits.DoubleToSortableLong(d));
                 break;
             default:
                 throw new NotSupportedException(
@@ -720,15 +759,20 @@ public abstract class CoraxDocumentConverterBase : ConverterBase
         int AppendAnalyzedTerm(Span<byte> term)
         {
             var analyzedTerm = builder.AnalyzeSingleTerm(indexFieldId, term);
-            var buffer = EnsureHasSpace(analyzedTerm.Length - term.Length); // just in case the analyze is _larger_
+            var buffer = EnsureHasSpace(analyzedTerm.Length);
             analyzedTerm.CopyTo(buffer[index..]);
             return analyzedTerm.Length;
         }
 
-        void AppendLong(long l)
+        // Raw signed long (numeric field values and DateTime/DateOnly/etc. ticks). The XOR mask makes the
+        // big-endian bytes order-preserving for negatives on fixed indexes; it is 0 on legacy indexes.
+        void AppendLong(long l) => AppendSortableLong(l ^ _compoundFieldNumericXorMask);
+
+        // Value already order-preserving as a long (e.g. Bits.DoubleToSortableLong output); written as-is.
+        void AppendSortableLong(long sortable)
         {
             EnsureHasSpace(sizeof(long));
-            BitConverter.TryWriteBytes(_compoundFieldsBuffer.AsSpan()[index..], Bits.SwapBytes(l));
+            BitConverter.TryWriteBytes(_compoundFieldsBuffer.AsSpan()[index..], Bits.SwapBytes(sortable));
             index += sizeof(long);
         }
     }

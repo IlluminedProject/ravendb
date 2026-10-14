@@ -1,15 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Formats.Asn1;
 using System.Linq;
 using System.Net.Security;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Raven.Client;
 using Raven.Client.Documents.Operations;
+using Raven.Client.ServerWide.Operations.Certificates;
 using Raven.Client.Util;
 using Raven.Server.Commercial;
 using Raven.Server.Commercial.SetupWizard;
@@ -46,14 +49,22 @@ namespace Raven.Server.Utils
             X509Certificate2 issuerCertificate = null;
 
             var userChain = new X509Chain();
+            var knownCertChain = new X509Chain();
+
+            if (PlatformDetails.RunningOnMacOsx)
+            {
+                using (var store = new X509Store(StoreName.CertificateAuthority, StoreLocation.CurrentUser))
+                {
+                    store.Open(OpenFlags.ReadOnly);
+                    userChain.ChainPolicy.ExtraStore.AddRange(store.Certificates);
+                    knownCertChain.ChainPolicy.ExtraStore.AddRange(store.Certificates);
+                }
+            }
+
             // we are not disabling certificate downloads because this method is checking public key pinning hashes
             // in order to do that properly it needs to be able to verify the chain by download the certificates
             // userChain.ChainPolicy.DisableCertificateDownloads = true;
-
-            var knownCertChain = new X509Chain();
-            // we are not disabling certificate downloads because this method is checking public key pinning hashes
-            // in order to do that properly it needs to be able to verify the chain by download the certificates
-            //knownCertChain.ChainPolicy.DisableCertificateDownloads = true;
+            // knownCertChain.ChainPolicy.DisableCertificateDownloads = true;
 
             explanations?.Add($"Try building client certificate chain - {userCertificate.GetDisplayName()}.");
             try
@@ -770,9 +781,31 @@ namespace Raven.Server.Utils
 
         public static X509Certificate2 BuildNewPfx(SetupInfo setupInfo, X509Certificate2 certificate, AsymmetricAlgorithm privateKey)
         {
-            // Combine the main certificate and the private key.
-            var certificateWithPrivateKey = certificate.CopyWithPrivateKey((RSA)privateKey);
+            X509Certificate2 safeCertificate = certificate;
 
+            if (PlatformDetails.RunningOnMacOsx)
+            {
+                // Stripping the keychain context by exporting to raw public bytes (CER) and re-importing
+                // prevents the AppleCrypto crash during CopyWithPrivateKey.
+                byte[] rawPublicBytes = certificate.Export(X509ContentType.Cert);
+#pragma warning disable SYSLIB0057
+                safeCertificate = new X509Certificate2(rawPublicBytes);
+#pragma warning restore SYSLIB0057
+            }
+
+            // Combine the main certificate and the private key safely for both RSA and ECDSA.
+            X509Certificate2 certificateWithPrivateKey;
+            if (privateKey is RSA rsa)
+                certificateWithPrivateKey = safeCertificate.CopyWithPrivateKey(rsa);
+            else if (privateKey is ECDsa ecdsa)
+                certificateWithPrivateKey = safeCertificate.CopyWithPrivateKey(ecdsa);
+            else
+                throw new NotSupportedException($"Unsupported key type: {privateKey.GetType().Name}");
+            
+            if (PlatformDetails.RunningOnMacOsx)
+            {
+                safeCertificate.Dispose();
+            }
             // Build the complete certificate chain.
             using var chain = new X509Chain();
             chain.ChainPolicy.DisableCertificateDownloads = true;
@@ -866,6 +899,73 @@ namespace Raven.Server.Utils
             copy.ImportEncryptedPkcs8PrivateKey(nameof(GetExportableRsaPrivateKey), exported, out _);
 
             return copy;
+        }
+
+        /// <summary>
+        /// Compares two public-key pinning hashes. These are base64-encoded public-key hashes, not secrets, so a
+        /// plain ordinal comparison is used (no constant-time requirement) - this also avoids allocating byte
+        /// arrays on the SSO auth path, which runs this once per registered server hash.
+        /// Both inputs must be non-null and non-empty - otherwise returns false.
+        /// </summary>
+        internal static bool PinningHashEquals(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+                return false;
+
+            return string.Equals(a, b, StringComparison.Ordinal);
+        }
+
+        // Upper bound on the length of identity fields (username/domain) parsed from a client-presented SSO
+        // certificate extension. Any real provider identity is far shorter; this guards against a crafted cert.
+        private const int MaxSsoIdentityFieldLength = 1024;
+
+        /// <summary>
+        /// Decodes the SSO user payload from a custom X.509 extension's RawData.
+        /// The value must be a DER-encoded ASN.1 UTF8String containing JSON:
+        ///   {"username":"...", "provider":"Github|Google|Microsoft|Windows", "domain":"..."}
+        /// Returns an empty payload if the input is null, empty, or malformed.
+        /// </summary>
+        public static SsoExtensionPayload DecodeSsoUserIdExtension(byte[] rawData)
+        {
+            if (rawData == null || rawData.Length == 0)
+                return default;
+
+            try
+            {
+                var reader = new AsnReader(rawData, AsnEncodingRules.DER);
+                var json = reader.ReadCharacterString(UniversalTagNumber.UTF8String);
+                reader.ThrowIfNotEmpty();
+
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("username", out var usernameEl) == false ||
+                    root.TryGetProperty("provider", out var providerEl) == false)
+                    return default;
+
+                var username = usernameEl.GetString();
+                if (Enum.TryParse<SsoProvider>(providerEl.GetString(), ignoreCase: true, out var provider) == false)
+                    return default;
+
+                string domain = null;
+                if (root.TryGetProperty("domain", out var domainEl))
+                    domain = domainEl.GetString();
+
+                // The values come straight out of a client-presented certificate extension whose RawData can be tens
+                // of KB. Cap them: a crafted cert could otherwise carry a multi-MB identity that lives on the
+                // connection for its lifetime, is written into every audit line, and is string-compared against every
+                // SsoClient entry on each connection. No real provider identity needs anywhere near this.
+                if (username != null && username.Length > MaxSsoIdentityFieldLength)
+                    return default;
+                if (domain != null && domain.Length > MaxSsoIdentityFieldLength)
+                    return default;
+
+                return new SsoExtensionPayload(username, provider, domain);
+            }
+            catch (Exception e) when (e is AsnContentException or JsonException or DecoderFallbackException or ArgumentException)
+            {
+                return default;
+            }
         }
     }
 }

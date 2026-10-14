@@ -11,9 +11,8 @@ using Sparrow.Json;
 
 namespace Raven.Server.Documents.Handlers.AI.Agents;
 
-internal class Talker(ConversationHandler handler, JsonOperationContext context, AiAgentConfiguration configuration, ConversationDocument document, string firstStreamPropertyPath, Func<Memory<byte>, Task> streaming) : IDisposable
+internal class Talker(ConversationHandler handler, JsonOperationContext context, AiAgentConfiguration configuration, string schema, ConversationDocument document, string firstStreamPropertyPath, Func<Memory<byte>, Task> streaming) : IDisposable
 {
-    private string _schema;
     private List<BlittableJsonReaderObject> _tools;
 
     public AiUsage AiUsage;
@@ -24,18 +23,17 @@ internal class Talker(ConversationHandler handler, JsonOperationContext context,
     {
         document.EnsureInitialized();
 
-        _schema = ChatCompletionClient.GetSchemaForRequest(configuration.OutputSchema, configuration.SampleObject);
         Client = handler.CreateClient();
         _tools = Client.GenerateTools(context, configuration, handler);
     }
 
-    public HttpRequestMessage CreateCompletionRequest(List<AiAttachment> attachments)
+    public HttpRequestMessage CreateCompletionRequest(List<AiAttachment> attachments, AiDebugTrace trace)
     {
         AiUsage = new();
-        return Client.CreateCompletionRequest(context, document.Messages, attachments, _tools, useTools: document.RemainingToolIterations-- > 0, streaming != null, _schema);
+        return Client.CreateCompletionRequest(context, document.Messages, attachments, _tools, useTools: document.RemainingToolIterations-- > 0, streaming != null, schema, promptCacheKey: document.Id, trace: trace);
     }
 
-    public async Task<AiResponse> RunAsync(IMemoryContextPool contextPool, HttpRequestMessage request, CancellationToken token)
+    public async Task<AiResponse> RunAsync(IMemoryContextPool contextPool, HttpRequestMessage request, AiDebugTrace trace, CancellationToken token)
     {
         if (streaming is null)
         {
@@ -43,6 +41,8 @@ internal class Talker(ConversationHandler handler, JsonOperationContext context,
                 context,
                 request,
                 AiUsage,
+                schema,
+                trace,
                 token
             );
         }
@@ -54,6 +54,8 @@ internal class Talker(ConversationHandler handler, JsonOperationContext context,
             request,
             streaming,
             AiUsage,
+            schema,
+            trace,
             token
         );
     }

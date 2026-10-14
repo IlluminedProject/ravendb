@@ -489,6 +489,7 @@ export class ManageServerStubs {
         return [
             {
                 Date: "2024-11-05 10:48:58.9905",
+                NodeTag: "A",
                 Level: "INFO",
                 ThreadID: "3",
                 Resource: "LONG MESSAGE",
@@ -502,6 +503,7 @@ export class ManageServerStubs {
             },
             {
                 Date: "2024-11-05 10:48:59.0080",
+                NodeTag: "A",
                 Level: "DEBUG",
                 ThreadID: "24",
                 Resource: "Server",
@@ -514,6 +516,7 @@ export class ManageServerStubs {
             },
             {
                 Date: "2024-11-05 10:48:59.0575",
+                NodeTag: "A",
                 Level: "WARN",
                 ThreadID: "24",
                 Resource: "Server",
@@ -526,6 +529,7 @@ export class ManageServerStubs {
             },
             {
                 Date: "2024-11-05 10:48:59.4414",
+                NodeTag: "B",
                 Level: "ERROR",
                 ThreadID: "11",
                 Resource: "Sparrow",
@@ -539,6 +543,7 @@ export class ManageServerStubs {
             },
             {
                 Date: "2024-11-05 10:49:04.4572",
+                NodeTag: "B",
                 Level: "FATAL",
                 ThreadID: "11",
                 Resource: "Sparrow",
@@ -552,6 +557,7 @@ export class ManageServerStubs {
             },
             {
                 Date: "2024-11-05 10:49:09.4670",
+                NodeTag: "C",
                 Level: "OFF",
                 ThreadID: "11",
                 Resource: "Sparrow",
@@ -565,6 +571,7 @@ export class ManageServerStubs {
             },
             {
                 Date: "2024-11-05 10:49:11.4588",
+                NodeTag: "C",
                 Level: "TRACE",
                 ThreadID: "24",
                 Resource: "Server",
@@ -613,7 +620,7 @@ export class ManageServerStubs {
                     HasTwoFactor: false,
                 },
                 {
-                    Name: "About to expire cert",
+                    Name: "About to expire certAbout to expire certAbout to expire certAbout to expire certAbout to expire certAbout to expire certAbout to expire certAbout to expire cert",
                     Thumbprint: "05576326B5A2EC2CC59B4CDBFE51243ADC56187B",
                     SecurityClearance: "ValidUser",
                     Permissions: {
@@ -648,6 +655,23 @@ export class ManageServerStubs {
                     HasTwoFactor: false,
                 },
                 {
+                    Name: "Disabled cert",
+                    Thumbprint: "7C19B1CD3171F10C55A7CC58E4E993D8524332B2",
+                    SecurityClearance: "Operator",
+                    Permissions: {},
+                    NotAfter: moment()
+                        .add(-5 as const, "days")
+                        .format(),
+                    NotBefore: moment()
+                        .add(-20 as const, "days")
+                        .format(),
+                    CollectionSecondaryKeys: [],
+                    CollectionPrimaryKey: "",
+                    PublicKeyPinningHash: "uYDktnF7XEos5gOGMC4t4eBi5MDSAHDpFqX1rV9oLCE=",
+                    HasTwoFactor: false,
+                    Disabled: true,
+                },
+                {
                     Name: "Server Certificate for communication A",
                     Thumbprint: "JF61904E1926ED2EDD5BB4BA8BC34742960B7100",
                     SecurityClearance: "ClusterNode",
@@ -668,6 +692,92 @@ export class ManageServerStubs {
             LoadedServerCertForCommunication: "JF61904E1926ED2EDD5BB4BA8BC34742960B7100",
             WellKnownAdminCerts: ["AdminCerts1", "AdminCerts2"],
             WellKnownIssuers: ["Issuers1", "Issuers2"],
+        };
+    }
+
+    static certificatesWithSso(): CertificatesResponseDto {
+        const ssoServerPinningHash1 = "SEZWHsvbycEsXVNFnj7a3Ou6r1B2xVmPQMhlmgw/NJc=";
+        const ssoServerPinningHash2 = "hyaqn9MDYitTWCf+oGwvu+GG9xqyxzZoZLANt5F/BL4=";
+
+        return {
+            Certificates: [
+                ...ManageServerStubs.certificates().Certificates,
+                {
+                    Name: "Corporate SSO Server",
+                    Thumbprint: "AA11904E1926ED2EDD5BB4BA8BC34742960BAAA1",
+                    SecurityClearance: "ValidUser",
+                    Permissions: {},
+                    NotAfter: moment()
+                        .add(2 as const, "years")
+                        .format(),
+                    NotBefore: moment()
+                        .add(-10 as const, "days")
+                        .format(),
+                    CollectionSecondaryKeys: [],
+                    CollectionPrimaryKey: "",
+                    PublicKeyPinningHash: ssoServerPinningHash1,
+                    Usage: "SsoServer",
+                    HasTwoFactor: false,
+                },
+                {
+                    Name: "Backup SSO Server",
+                    Thumbprint: "BB22904E1926ED2EDD5BB4BA8BC34742960BBBB2",
+                    SecurityClearance: "ValidUser",
+                    Permissions: {},
+                    NotAfter: moment()
+                        .add(1 as const, "years")
+                        .format(),
+                    NotBefore: moment()
+                        .add(-5 as const, "days")
+                        .format(),
+                    CollectionSecondaryKeys: [],
+                    CollectionPrimaryKey: "",
+                    PublicKeyPinningHash: ssoServerPinningHash2,
+                    Usage: "SsoServer",
+                    HasTwoFactor: false,
+                },
+                {
+                    Name: "SSO User: john@example.com",
+                    Thumbprint: "CC33904E1926ED2EDD5BB4BA8BC34742960BCCC3",
+                    SecurityClearance: "ValidUser",
+                    Permissions: {
+                        db1: "ReadWrite",
+                    },
+                    NotAfter: moment()
+                        .add(2 as const, "years")
+                        .format(),
+                    NotBefore: moment()
+                        .add(-10 as const, "days")
+                        .format(),
+                    CollectionSecondaryKeys: [],
+                    CollectionPrimaryKey: "",
+                    PublicKeyPinningHash: "CCZWHsvbycEsXVNFnj7a3Ou6r1B2xVmPQMhlmgw/CC3=",
+                    Usage: "SsoClient",
+                    SsoServerPublicKeyPinningHashes: [ssoServerPinningHash1],
+                    AllowAnySsoServer: false,
+                    HasTwoFactor: false,
+                },
+                {
+                    Name: "SSO User: alice@example.com",
+                    Thumbprint: "DD44904E1926ED2EDD5BB4BA8BC34742960BDDD4",
+                    SecurityClearance: "Operator",
+                    Permissions: {},
+                    NotAfter: null,
+                    NotBefore: null,
+                    Disabled: true,
+                    CollectionSecondaryKeys: [],
+                    CollectionPrimaryKey: "",
+                    PublicKeyPinningHash: "DDZWHsvbycEsXVNFnj7a3Ou6r1B2xVmPQMhlmgw/DD4=",
+                    Usage: "SsoClient",
+                    SsoServerPublicKeyPinningHashes: [],
+                    AllowAnySsoServer: true,
+                    HasTwoFactor: false,
+                },
+            ],
+            LoadedServerCert: ManageServerStubs.certificates().LoadedServerCert,
+            LoadedServerCertForCommunication: ManageServerStubs.certificates().LoadedServerCertForCommunication,
+            WellKnownAdminCerts: ManageServerStubs.certificates().WellKnownAdminCerts,
+            WellKnownIssuers: ManageServerStubs.certificates().WellKnownIssuers,
         };
     }
 
@@ -700,5 +810,43 @@ export class ManageServerStubs {
         return {
             Secret: "RNHRX6WXCLZVQPJSW5NSWV64JU65E5WA",
         };
+    }
+
+    static serverWideTasks(): Raven.Server.Web.System.AdminStudioServerWideHandler.ServerWideTasksResult {
+        const replicationTask: Raven.Server.Web.System.AdminStudioServerWideHandler.ServerWideTasksResult.ServerWideExternalReplicationTask =
+            {
+                TaskId: 101,
+                TaskName: "ExternalReplicationTask",
+                TaskType: "Replication",
+                TaskState: "Enabled",
+                TaskConnectionStatus: "Active",
+                Error: null,
+                MentorNode: null,
+                PinToMentorNode: false,
+                ResponsibleNode: { NodeTag: "A", NodeUrl: "http://127.0.0.1:8080", ResponsibleNode: "A" },
+                ExcludedDatabases: ["ExcludedDb"],
+                DelayReplicationFor: "00:05:00",
+                TopologyDiscoveryUrls: ["http://target-cluster:8080"],
+            };
+
+        const backupTask: Raven.Server.Web.System.AdminStudioServerWideHandler.ServerWideTasksResult.ServerWideBackupTask =
+            {
+                TaskId: 102,
+                TaskName: "BackupTask",
+                TaskType: "Backup",
+                TaskState: "Enabled",
+                TaskConnectionStatus: "Active",
+                Error: null,
+                MentorNode: null,
+                PinToMentorNode: false,
+                ResponsibleNode: { NodeTag: "A", NodeUrl: "http://127.0.0.1:8080", ResponsibleNode: "A" },
+                ExcludedDatabases: [],
+                BackupDestinations: ["Local"],
+                BackupType: "Backup",
+                IsEncrypted: false,
+                RetentionPolicy: { Disabled: false, MinimumBackupAgeToKeep: "30.00:00:00" },
+            };
+
+        return { Tasks: [replicationTask, backupTask] };
     }
 }

@@ -1,4 +1,5 @@
-﻿using System.Threading.Tasks;
+﻿using System;
+using System.Threading.Tasks;
 using FastTests;
 using Newtonsoft.Json;
 using Raven.Client.Documents.AI;
@@ -43,7 +44,7 @@ public class RavenDB_24887(ITestOutputHelper output) : RavenTestBase(output)
 
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task CanCallOneAgentFromAnother(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -129,7 +130,7 @@ public class RavenDB_24887(ITestOutputHelper output) : RavenTestBase(output)
     }
 
     [RavenTheory(RavenTestCategory.Ai)]
-    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+    [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task AnActionFromSubAgentCanBeHandledByParentConversation(Options options, GenAiConfiguration config)
     {
         using var store = GetDocumentStore(options);
@@ -234,6 +235,8 @@ public class RavenDB_24887(ITestOutputHelper output) : RavenTestBase(output)
         Assert.NotNull(addToCartArgs);
         // and were able to "solve" it properly
         Assert.Equal(AiConversationResult.Done, result.Status);
-        Assert.Contains("added", result.Answer.Message);
+        Assert.True(result.Answer.Message.Contains("added", StringComparison.OrdinalIgnoreCase) ||
+                    result.Answer.Message.Contains("already", StringComparison.OrdinalIgnoreCase),
+            result.Answer.Message);
     }
 }

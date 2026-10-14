@@ -199,11 +199,27 @@ namespace Raven.Server.Documents.Indexes
             public const long CoraxUnicodeAnalyzers_62 = 62_004; // RavenDB-22999
             private const long LowerCasedReferences_62 = 62_005; // RavenDB-23100
             public const long CoraxPagingBasedOnEntriesId_62 = 62_006; // RavenDB-23100
+            public const long CoraxUnicodeLengthAnalyzers_62 = 62_007; // RavenDB-24423
+            public const long CoraxNumericTreesWithoutFrequencies_62 = 62_008; // RavenDB-27171
+            public const long LuceneExactDatesUseTimeTicks_62 = 62_009; // RavenDB-27052
+
+            public const long Base72Version = 72_001;
+
+            // RavenDB-26831: compound-field numeric (long) members were encoded as raw two's-complement big-endian,
+            // which is not order-preserving for negative values (negatives sort above positives). Indexes at this
+            // version or higher encode them order-preserving (sign-bit flipped), so compound sorts/ranges over a
+            // numeric field with negative values are correct. Older indexes keep the legacy encoding (and behavior);
+            // resetting/rebuilding an index upgrades it to the fixed encoding.
+            public const long CoraxOrderPreservingCompoundNumericEncoding = Base72Version; // RavenDB-26831
+            public const long CoraxNumericTreesWithoutFrequencies_72 = 72_002; // RavenDB-27171
+            public const long LuceneExactDatesUseTimeTicks_72 = 72_003; // RavenDB-27052
+            public const long CoraxPerEntryMultipleTermsMarker_72 = 72_004; // RavenDB-27565
+            public const long CoraxCharAsString_72 = 72_005; // RavenDB-27596
 
             /// <summary>
             /// Remember to bump this
             /// </summary>
-            public const long CurrentVersion = CoraxPagingBasedOnEntriesId_62;
+            public const long CurrentVersion = CoraxCharAsString_72;
 
             public static bool IsLowerCasedReferencesSupported(long indexVersion)
             {
@@ -244,6 +260,32 @@ namespace Raven.Server.Documents.Indexes
                     return indexVersion >= CoraxSearchWildcardAdjustment_61;
 
                 return indexVersion >= CoraxSearchWildcardAdjustment_60;
+            }
+
+            public static bool IsNumericTreesWithoutFrequenciesSupported(long indexVersion)
+            {
+                if (indexVersion >= Base72Version)
+                    return indexVersion >= CoraxNumericTreesWithoutFrequencies_72;
+
+                return indexVersion >= CoraxNumericTreesWithoutFrequencies_62;
+            }
+
+            public static bool IsLuceneExactDatesUseTimeTicksSupported(long indexVersion)
+            {
+                if (indexVersion >= Base72Version)
+                    return indexVersion >= LuceneExactDatesUseTimeTicks_72;
+
+                return indexVersion >= LuceneExactDatesUseTimeTicks_62;
+            }
+
+            public static bool IsPerEntryMultipleTermsMarkerSupported(long indexVersion)
+            {
+                return indexVersion >= CoraxPerEntryMultipleTermsMarker_72;
+            }
+
+            public static bool IsCoraxCharAsStringSupported(long indexVersion)
+            {
+                return indexVersion >= CoraxCharAsString_72;
             }
         }
     }

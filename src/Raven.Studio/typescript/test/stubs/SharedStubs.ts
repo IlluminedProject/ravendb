@@ -19,6 +19,26 @@ export class SharedStubs {
         };
     }
 
+    static aiConnectionTestErrorResult(): Raven.Server.Documents.AI.AiConnectionTestResult {
+        return {
+            Success: false,
+            Log: [],
+            Error: "System.Net.Http.HttpRequestException: No connection could be made because the target machine actively refused it.",
+            AcceptsImageInput: false,
+            SupportsTools: false,
+        };
+    }
+
+    static aiConnectionTestSuccessResult(): Raven.Server.Documents.AI.AiConnectionTestResult {
+        return {
+            Success: true,
+            Log: [],
+            Error: null,
+            AcceptsImageInput: true,
+            SupportsTools: true,
+        };
+    }
+
     static aiModels(): string[] {
         return ["text-embedding-ada-002", "gpt-3.5-turbo", "gpt-4.1"];
     }

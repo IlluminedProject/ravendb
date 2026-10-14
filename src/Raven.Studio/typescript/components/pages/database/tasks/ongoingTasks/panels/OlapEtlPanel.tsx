@@ -1,14 +1,11 @@
-﻿import React, { useCallback } from "react";
+﻿import React from "react";
 import {
-    BaseOngoingTaskPanelProps,
     ConnectionStringItem,
     EmptyScriptsWarning,
-    ICanShowTransformationScriptPreview,
     OngoingTaskActions,
     OngoingTaskName,
     OngoingTaskResponsibleNode,
     OngoingTaskStatus,
-    useTasksOperations,
 } from "../../shared/shared";
 import { OngoingTaskOlapEtlInfo } from "components/models/tasks";
 import { useAppUrls } from "hooks/useAppUrls";
@@ -26,53 +23,31 @@ import Collapse from "react-bootstrap/Collapse";
 import Form from "react-bootstrap/Form";
 import { databaseSelectors } from "components/common/shell/databaseSliceSelectors";
 import { useAppSelector } from "components/store";
-import { accessManagerSelectors } from "components/common/shell/accessManagerSliceSelectors";
 import { Icon } from "components/common/Icon";
+import { EtlPanelBaseProps, useEtlPanel } from "./etlPanelUtils";
+import { TaskPanelErrors, EtlPanelHealthBadge, EtlPanelProgressItem, EtlPanelToggleButton } from "./EtlPanelComponents";
 
-type OlapEtlPanelProps = BaseOngoingTaskPanelProps<OngoingTaskOlapEtlInfo>;
+type OlapEtlPanelProps = EtlPanelBaseProps<OngoingTaskOlapEtlInfo>;
 
-function Details(props: OlapEtlPanelProps & { canEdit: boolean }) {
-    const { data, canEdit } = props;
-    const { appUrl } = useAppUrls();
+export function OlapEtlPanel(props: OlapEtlPanelProps) {
+    const { data, toggleSelection, isSelected, onTaskOperation, isDeleting, isTogglingState, etlStats } = props;
 
-    const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
-    const connectionStringsUrl = appUrl.forConnectionStrings(databaseName, "Olap", data.shared.connectionStringName);
-
-    return (
-        <RichPanelDetails>
-            {data.shared.destinations.map((dst) => (
-                <RichPanelDetailItem label="Destination" key={dst}>
-                    {dst}
-                </RichPanelDetailItem>
-            ))}
-            <ConnectionStringItem
-                connectionStringDefined
-                canEdit={canEdit}
-                connectionStringName={data.shared.connectionStringName}
-                connectionStringsUrl={connectionStringsUrl}
-            />
-            <EmptyScriptsWarning task={data} />
-        </RichPanelDetails>
-    );
-}
-
-export function OlapEtlPanel(props: OlapEtlPanelProps & ICanShowTransformationScriptPreview) {
-    const { data, showItemPreview, toggleSelection, isSelected, onTaskOperation, isDeleting, isTogglingState } = props;
-
-    const hasDatabaseAdminAccess = useAppSelector(accessManagerSelectors.getHasDatabaseAdminAccess)();
     const { forCurrentDatabase } = useAppUrls();
-
-    const canEdit = hasDatabaseAdminAccess && !data.shared.serverWide;
     const editUrl = forCurrentDatabase.editOlapEtl(data.shared.taskId)();
 
-    const { detailsVisible, toggleDetails, onEdit } = useTasksOperations(editUrl, props);
+    const {
+        canEdit,
+        goToTaskErrors,
+        detailsVisible,
+        toggleDetails,
+        onEdit,
+        taskHealth,
+        errorCount,
+        errorsByLocation,
+        etlProgress,
+    } = useEtlPanel(props, editUrl);
 
-    const showPreview = useCallback(
-        (transformationName: string) => {
-            showItemPreview(data, transformationName);
-        },
-        [data, showItemPreview]
-    );
+    const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
 
     return (
         <RichPanel>
@@ -90,10 +65,6 @@ export function OlapEtlPanel(props: OlapEtlPanelProps & ICanShowTransformationSc
                     <OngoingTaskName task={data} canEdit={canEdit} editUrl={editUrl} />
                 </RichPanelInfo>
                 <RichPanelActions>
-                    <span>
-                        <Icon icon="olap-etl" />
-                        OLAP ETL
-                    </span>
                     <OngoingTaskResponsibleNode task={data} />
                     <OngoingTaskStatus
                         task={data}
@@ -109,13 +80,47 @@ export function OlapEtlPanel(props: OlapEtlPanelProps & ICanShowTransformationSc
                         toggleDetails={toggleDetails}
                         isDeleting={isDeleting(data.shared.taskId)}
                         isDetailsOpen={detailsVisible}
+                        isEtl
                     />
                 </RichPanelActions>
             </RichPanelHeader>
+            <RichPanelDetails>
+                <EtlPanelToggleButton detailsVisible={detailsVisible} toggleDetails={toggleDetails} />
+                <RichPanelDetailItem label="Type">
+                    <Icon icon="olap-etl" />
+                    OLAP ETL
+                </RichPanelDetailItem>
+                <ConnectionStringItem
+                    connectionStringDefined
+                    canEdit={canEdit}
+                    connectionStringName={data.shared.connectionStringName}
+                    connectionStringType="Olap"
+                    databaseName={databaseName}
+                />
+                {data.shared.destinations.map((dst) => (
+                    <RichPanelDetailItem data-testid="destination" label="Destination" key={dst} title={dst}>
+                        <div className="text-truncate" style={{ maxWidth: "200px" }}>
+                            {dst}
+                        </div>
+                    </RichPanelDetailItem>
+                ))}
+                <RichPanelDetailItem label="Destination Description" title={data.shared.destinationDescription}>
+                    <div className="text-truncate" style={{ maxWidth: "200px" }}>
+                        {data.shared.destinationDescription}
+                    </div>
+                </RichPanelDetailItem>
+                <EtlPanelHealthBadge taskHealth={taskHealth} />
+                <TaskPanelErrors
+                    errorCount={errorCount}
+                    errorsByLocation={errorsByLocation}
+                    goToTaskErrors={goToTaskErrors}
+                />
+                <EtlPanelProgressItem etlProgress={etlProgress} />
+                <EmptyScriptsWarning task={data} />
+            </RichPanelDetails>
             <Collapse in={detailsVisible}>
                 <div>
-                    <Details {...props} canEdit={canEdit} />
-                    <OngoingEtlTaskDistribution task={data} showPreview={showPreview} />
+                    <OngoingEtlTaskDistribution task={data} etlStats={etlStats} />
                 </div>
             </Collapse>
         </RichPanel>

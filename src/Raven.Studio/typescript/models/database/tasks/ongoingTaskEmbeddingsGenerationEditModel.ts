@@ -50,6 +50,7 @@ class ongoingTaskEmbeddingsGenerationEditModel extends ongoingTaskEditModel {
     queryingMaxTokensPerChunk = ko.observable<number>(null);
     queryingOverlapTokens = ko.observable<number>(null);
     embeddingsCacheForQueryingExpiration = ko.observable<number>(defaultEmbeddingsCacheForQueryingExpiration);
+    storeChunkText = ko.observable<boolean>(false);
 
     quantizationType = ko.observable<Raven.Client.Documents.Indexes.Vector.VectorEmbeddingType>("Single");
     quantizationTypeOptions: valueAndLabelItem<Raven.Client.Documents.Indexes.Vector.VectorEmbeddingType, string>[] = [
@@ -393,7 +394,8 @@ class ongoingTaskEmbeddingsGenerationEditModel extends ongoingTaskEditModel {
             ChunkingOptions: {
                 OverlapTokens: this.pathConfigurationOverlapTokens() ?? 0,
                 ChunkingMethod: this.pathConfigurationChunkingMethod(),
-                MaxTokensPerChunk: this.pathConfigurationMaxTokensPerChunk() ?? this.maxTokensPerChunkDefaultValue()
+                MaxTokensPerChunk: this.pathConfigurationMaxTokensPerChunk() ?? this.maxTokensPerChunkDefaultValue(),
+                ContextPrefix: null
             }
         });
         this.pathConfigurationPath("");
@@ -442,6 +444,7 @@ class ongoingTaskEmbeddingsGenerationEditModel extends ongoingTaskEditModel {
             if (configuration.EmbeddingsCacheForQueryingExpiration) {
                 this.embeddingsCacheForQueryingExpiration(genUtils.timeSpanToSeconds(configuration.EmbeddingsCacheForQueryingExpiration));
             }
+            this.storeChunkText(configuration.StoreChunkText ?? false);
             if (configuration.EmbeddingsPathConfigurations) {
                 this.embeddingPathConfigurations(configuration.EmbeddingsPathConfigurations);
             }
@@ -489,10 +492,12 @@ class ongoingTaskEmbeddingsGenerationEditModel extends ongoingTaskEditModel {
                 OverlapTokens: this.queryingOverlapTokens() ?? 0,
                 ChunkingMethod: this.queryingChunkingMethod(),
                 MaxTokensPerChunk: this.queryingMaxTokensPerChunk() ?? this.maxTokensPerChunkDefaultValue(),
+                ContextPrefix: null
             },
             Quantization: this.quantizationType(),
+            StoreChunkText: this.storeChunkText(),
             EmbeddingsTransformation: this.embeddingsSource() === "script" ? {
-                Script: this.script(), ChunkingOptions: { OverlapTokens: this.transformationOverlapTokens() ?? 0, MaxTokensPerChunk: this.transformationMaxTokensPerChunk() ?? this.maxTokensPerChunkDefaultValue(), ChunkingMethod: this.transformationChunkingMethod() }
+                Script: this.script(), ChunkingOptions: { OverlapTokens: this.transformationOverlapTokens() ?? 0, MaxTokensPerChunk: this.transformationMaxTokensPerChunk() ?? this.maxTokensPerChunkDefaultValue(), ChunkingMethod: this.transformationChunkingMethod(), ContextPrefix: null }
             } : null,
             EmbeddingsPathConfigurations: this.embeddingsSource() === "paths" ? this.embeddingPathConfigurations() : [],
             EmbeddingsCacheExpiration: genUtils.formatAsTimeSpan(this.embeddingsCacheExpiration() * 1000),

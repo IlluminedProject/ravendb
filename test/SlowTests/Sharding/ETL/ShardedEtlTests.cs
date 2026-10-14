@@ -38,7 +38,6 @@ using Raven.Server.ServerWide.Context;
 using Raven.Server.SqlMigration;
 using Raven.Server.Utils;
 using Raven.Tests.Core.Utils.Entities;
-using SlowTests.Server.Documents.ETL.Olap;
 using SlowTests.Server.Documents.ETL.Raven;
 using SlowTests.Server.Documents.ETL.SQL;
 using SlowTests.Server.Documents.Migration;
@@ -1309,7 +1308,7 @@ loadToOrders(partitionBy(key), o);
                 var expectedFields = new[] { "RequireAt", "Total", ParquetTransformedItems.DefaultIdColumn, ParquetTransformedItems.LastModifiedColumn };
 
                 using (var fs = File.OpenRead(files[0]))
-                using (var parquetReader = await ParquetReader.CreateAsync(fs))
+                await using (var parquetReader = await ParquetReader.CreateAsync(fs))
                 {
                     Assert.Equal(1, parquetReader.RowGroupCount);
                     Assert.Equal(expectedFields.Length, parquetReader.Schema.Fields.Count);
@@ -1465,7 +1464,7 @@ loadToOrders(partitionBy(['order_date', key]), orderData);
                         await using var ms = new MemoryStream();
                         await blob.Data.CopyToAsync(ms);
 
-                        using (var parquetReader = await ParquetReader.CreateAsync(ms))
+                        await using (var parquetReader = await ParquetReader.CreateAsync(ms))
                         {
                             Assert.Equal(1, parquetReader.RowGroupCount);
 
@@ -1510,7 +1509,7 @@ loadToOrders(partitionBy(['order_date', key]), orderData);
                         await using var ms = new MemoryStream();
                         await blob.Data.CopyToAsync(ms);
 
-                        using (var parquetReader = await ParquetReader.CreateAsync(ms))
+                        await using (var parquetReader = await ParquetReader.CreateAsync(ms))
                         {
                             Assert.Equal(1, parquetReader.RowGroupCount);
 

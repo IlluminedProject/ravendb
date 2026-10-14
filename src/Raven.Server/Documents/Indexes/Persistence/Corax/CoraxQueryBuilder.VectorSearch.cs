@@ -1,6 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Corax.Querying.Matches.Meta;
@@ -14,6 +16,7 @@ using Raven.Server.Documents.Indexes.Persistence.Corax.QueryOptimizer;
 using Raven.Server.Documents.Indexes.VectorSearch;
 using Raven.Server.Documents.Queries;
 using Raven.Server.Documents.Queries.AST;
+using Raven.Server.Documents.Queries.Timings;
 using Sparrow;
 using Sparrow.Json;
 
@@ -21,6 +24,39 @@ namespace Raven.Server.Documents.Indexes.Persistence.Corax;
 
 public static partial class CoraxQueryBuilder
 {
+    private static void CaptureVectorHighlighting(Parameters builderParameters, MethodExpression me, string fieldName, string embeddingsGenerationTaskIdentifier,
+        float minimumMatch, VectorValue? singleVector, VectorValue[] multiVector)
+    {
+        if (embeddingsGenerationTaskIdentifier is null)
+            return; // chunk text is only stored for embeddings-generation tasks
+
+        if (builderParameters.Metadata.HasHighlightings == false)
+            return;
+
+        // vector search runs on Corax only; a non-Corax read operation here would have failed far earlier.
+        Debug.Assert(builderParameters.IndexReadOperation is CoraxIndexReadOperation, "vector search is only supported on Corax indexes");
+        CoraxIndexReadOperation readOperation = (CoraxIndexReadOperation)builderParameters.IndexReadOperation;
+
+        List<byte[]> queryVectors = new();
+        if (singleVector is { IsNull: false } single)
+            queryVectors.Add(single.GetEmbedding().ToArray());
+
+        if (multiVector is not null)
+        {
+            foreach (VectorValue vector in multiVector)
+            {
+                if (vector.IsNull == false)
+                    queryVectors.Add(vector.GetEmbedding().ToArray());
+            }
+        }
+
+        if (queryVectors.Count == 0)
+            return;
+
+        string highlightFieldName = builderParameters.Metadata.GetVectorSourceFieldName(fieldName, me, builderParameters.QueryParameters);
+        readOperation.CaptureVectorChunkHighlighting(highlightFieldName, embeddingsGenerationTaskIdentifier, minimumMatch, queryVectors);
+    }
+
     private static CoraxVectorItem HandleVector(Parameters builderParameters, MethodExpression me, bool exact)
     {
         var metadata = builderParameters.Metadata;
@@ -114,6 +150,8 @@ public static partial class CoraxQueryBuilder
             
             var vector = VectorHelpers.GetEmbeddingsForQueryParameter(builderParameters, valueTokenType, methodParameter, embeddingsGenerationTaskIdentifier, vectorOptions, fieldName);
 
+            CaptureVectorHighlighting(builderParameters, me, fieldName, embeddingsGenerationTaskIdentifier, minimumMatch, vector.SingleVector, vector.MultiVector);
+
             if (vector.SingleVector != null)
             {
                 return CoraxVectorItem.BuildSingleVector(builderParameters, fieldMetadata, vector.SingleVector.Value, numberOfCandidates, minimumMatch, exact);
@@ -127,15 +165,19 @@ public static partial class CoraxQueryBuilder
             allowObjectsInParameters: false, allowArraysInParameters: true);
 
         (VectorValue? SingleVector, VectorValue[] MultiVector) transformedEmbeddings = (null, null);
-
-        if (VectorHelpers.TryRetrieveEtlTaskName(builderParameters, fieldName, out embeddingsGenerationTaskIdentifier))
+        int numberOfDimensions;
+        if (VectorHelpers.TryRetrieveEmbeddingsGenerationTaskIdentifier(builderParameters, fieldName, out embeddingsGenerationTaskIdentifier))
         {
             var vectorOptions = VectorHelpers.GetExplicitVectorOptions(builderParameters, fieldName, out indexField);
             transformedEmbeddings = VectorHelpers.GetEmbeddingsForQueryParameter(builderParameters, valueType, value, embeddingsGenerationTaskIdentifier, vectorOptions, fieldName);
+            CaptureVectorHighlighting(builderParameters, me, fieldName, embeddingsGenerationTaskIdentifier, minimumMatch, transformedEmbeddings.SingleVector, transformedEmbeddings.MultiVector);
         }
         else
         {
             VectorOptions vectorOptions = VectorHelpers.GetOptions(builderParameters, fieldName, out indexField);
+            
+            if (builderParameters.Index.IndexFieldsPersistence.TryReadNumberOfDimensions(fieldName, out  numberOfDimensions) == false)
+                return CoraxVectorItem.BuildEmpty(builderParameters); // no vector indexed
             if (vectorOptions.SourceEmbeddingType is VectorEmbeddingType.Text)
             {
                 transformedEmbeddings = VectorHelpers.GetVectorValueForTextualInput(builderParameters, vectorOptions, valueType, value);
@@ -189,7 +231,7 @@ public static partial class CoraxQueryBuilder
             }
         }
 
-        if (builderParameters.Index.IndexFieldsPersistence.TryReadNumberOfDimensions(fieldName, out var numberOfDimensions) == false)
+        if (builderParameters.Index.IndexFieldsPersistence.TryReadNumberOfDimensions(fieldName, out  numberOfDimensions) == false)
             return CoraxVectorItem.BuildEmpty(builderParameters); // no vector indexed
 
         if (transformedEmbeddings.SingleVector != null)
@@ -235,7 +277,7 @@ public static partial class CoraxQueryBuilder
         }
         
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool TryRetrieveEtlTaskName(Parameters builderParameters, in string fieldName, out string embeddingsGenerationTaskIdentifier)
+        public static bool TryRetrieveEmbeddingsGenerationTaskIdentifier(Parameters builderParameters, in string fieldName, out string embeddingsGenerationTaskIdentifier)
         {
             var existsInPersistence =
                 builderParameters.Index.IndexFieldsPersistence.TryReadEmbeddingsGenerationTaskIdentifier(fieldName, out embeddingsGenerationTaskIdentifier);
@@ -243,7 +285,7 @@ public static partial class CoraxQueryBuilder
             if (builderParameters.Metadata.IsDynamic == false)
                 return existsInPersistence;
 
-            if (((builderParameters.FieldsToFetch != null && builderParameters.FieldsToFetch.IndexFields.TryGetValue(fieldName, out var indexField)) || (builderParameters.Index.Definition.IndexFields.TryGetValue(fieldName, out indexField))) && indexField.Vector is AutoVectorOptions avo)
+            if (((builderParameters.FieldsToFetch != null && builderParameters.FieldsToFetch.IndexFields.TryGetValue(fieldName, out var indexField)) || builderParameters.Index.Definition.IndexFields.TryGetValue(fieldName, out indexField)) && indexField.Vector is AutoVectorOptions avo)
             {
                 embeddingsGenerationTaskIdentifier = avo.EmbeddingsGenerationTaskIdentifier;
                 return avo.EmbeddingsGenerationTaskIdentifier != null;            
@@ -370,7 +412,21 @@ public static partial class CoraxQueryBuilder
             var embeddingsTaskId = new EmbeddingsGenerationTaskIdentifier(embeddingsGenerationTaskIdentifier);
             
             var embeddingsGenerator = database.EmbeddingsGeneratorQueries;
-            
+
+            if (embeddingsGenerator.EmbeddingTaskExists(embeddingsTaskId) == false)
+            {
+                var taskConfiguration = database.EtlLoader.EmbeddingsGenerationDestinations
+                    .SingleOrDefault(x => x.Identifier == embeddingsGenerationTaskIdentifier);
+
+                if (taskConfiguration is null)
+                    throw new InvalidQueryException(
+                        $"Couldn't find Embeddings Generation task with '{embeddingsGenerationTaskIdentifier}' identifier");
+
+                if (taskConfiguration.Disabled)
+                    throw new InvalidQueryException(
+                        $"Embeddings Generation task with '{embeddingsGenerationTaskIdentifier}' identifier is disabled, and cannot be used for querying");
+            }
+
             var sourceEmbeddingType = embeddingsGenerator.GetQuantizationOf(embeddingsTaskId);
 
             // Quantized dynamic field indicates that the task generated embeddings with different quantization than requested in the index
@@ -393,28 +449,31 @@ public static partial class CoraxQueryBuilder
             
             ReadOnlyMemory<ReadOnlyMemory<byte>> embeddingValues;
 
-            switch (valueType)
+            using (builderParameters.QueryTimings?.For(nameof(QueryTimingsScope.Names.Embeddings), start: false)?.Start())
             {
-                case ValueTokenType.String:
-                    embeddingValues = embeddingsGenerator
-                        .GetEmbeddingsForQuery(builderParameters.DocumentsContext, embeddingsTaskId, value.ToString());
-                    break;
-                case ValueTokenType.Parameter:
+                switch (valueType)
                 {
-                    if (value is not BlittableJsonReaderArray bjra)
-                        throw new InvalidQueryException($"Expected array as parameter of vector.search({fieldName}) method, got '{value.GetType().FullName}' type instead.");
-                
-                    var values = new string[bjra.Length];
+                    case ValueTokenType.String:
+                        embeddingValues = embeddingsGenerator
+                            .GetEmbeddingsForQuery(builderParameters.DocumentsContext, embeddingsTaskId, value.ToString());
+                        break;
+                    case ValueTokenType.Parameter:
+                    {
+                        if (value is not BlittableJsonReaderArray bjra)
+                            throw new InvalidQueryException($"Expected array as parameter of vector.search({fieldName}) method, got '{value.GetType().FullName}' type instead.");
 
-                    for (var i = 0; i < values.Length; i++)
-                        values[i] = bjra[i].ToString();
-                
-                    embeddingValues = embeddingsGenerator
-                        .GetEmbeddingsForQuery(builderParameters.DocumentsContext, embeddingsTaskId, values);
-                    break;
+                        var values = new string[bjra.Length];
+
+                        for (var i = 0; i < values.Length; i++)
+                            values[i] = bjra[i].ToString();
+
+                        embeddingValues = embeddingsGenerator
+                            .GetEmbeddingsForQuery(builderParameters.DocumentsContext, embeddingsTaskId, values);
+                        break;
+                    }
+                    default:
+                        throw new NotSupportedException($"Unexpected value type provided as parameter to vector.search({fieldName}) method. Got '{value.GetType().FullName}' type.");
                 }
-                default:
-                    throw new NotSupportedException($"Unexpected value type provided as parameter to vector.search({fieldName}) method. Got '{value.GetType().FullName}' type.");
             }
             
             var queryingVectorOption = new VectorOptions

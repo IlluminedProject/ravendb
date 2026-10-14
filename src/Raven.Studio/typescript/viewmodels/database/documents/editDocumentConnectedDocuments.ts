@@ -17,10 +17,10 @@ import starredDocumentsStorage = require("common/storage/starredDocumentsStorage
 import virtualGridController = require("widgets/virtualGrid/virtualGridController");
 import downloader = require("common/downloader");
 import viewHelpers = require("common/helpers/view/viewHelpers");
-import editDocumentUploader = require("viewmodels/database/documents/editDocumentUploader");
 import columnPreviewPlugin = require("widgets/virtualGrid/columnPreviewPlugin");
 import genUtils = require("common/generalUtils");
 import _ = require("lodash")
+import AddAttachmentModal = require("viewmodels/database/documents/AddAttachmentModal");
 import AddAttachmentWithRemoteParametersModal = require("viewmodels/database/documents/AddAttachmentWithRemoteParametersModal");
 
 type connectedDocsTabs = "attachments" | "counters" | "revisions" | "related" | "recent" | "timeSeries";
@@ -84,12 +84,21 @@ class connectedDocuments {
     isArtificialDocument: KnockoutComputed<boolean>;
     isHiloDocument: KnockoutComputed<boolean>;  
 
+    isAddAttachmentModalVisible = ko.observable<boolean>(false);
+    addAttachmentModalView: ReactInKnockout<typeof AddAttachmentModal.default> = ko.pureComputed(() => ({
+        component: AddAttachmentModal.default,
+        props: {
+            document: this.document,
+            onUploaded: () => this.afterUpload(),
+            onClose: () => this.isAddAttachmentModalVisible(false)
+        }
+    }))
+
     isAddAttachmentWithRemoteParametersModalVisible = ko.observable<boolean>(false);
     remoteAttachmentParametersModalView: ReactInKnockout<typeof AddAttachmentWithRemoteParametersModal.default> = ko.pureComputed(() => ({
         component: AddAttachmentWithRemoteParametersModal.default,
         props: {
             document: this.document,
-            db: this.db,
             onUploaded: () => this.afterUpload(),
             onClose: () => this.isAddAttachmentWithRemoteParametersModalVisible(false)
         }
@@ -97,8 +106,6 @@ class connectedDocuments {
 
     gridController = ko.observable<virtualGridController<connectedItemType>>();
     private columnPreview = new columnPreviewPlugin<connectedItemType>();
-    
-    uploader: editDocumentUploader;
 
     private remoteAttachmentDisabledReason: KnockoutObservable<string>;
 
@@ -124,7 +131,6 @@ class connectedDocuments {
         this.document.subscribe((doc) => this.onDocumentLoaded(doc));
         this.loadDocumentAction = loadDocument;
         this.loadRevisionAction = loadRevision;
-        this.uploader = new editDocumentUploader(document, db, () => this.afterUpload());
         this.crudActionsProvider = crudActionsProvider;
 
         this.isUploaderActive = ko.pureComputed(() => {
@@ -464,12 +470,15 @@ class connectedDocuments {
             Type: "Revision"
         };
 
-        const url = endpoints.databases.attachment.attachments + appUrl.urlEncodeArgs(file);
+        const url = appUrl.forDatabaseQuery(this.db) + endpoints.databases.attachment.attachments + appUrl.urlEncodeArgs(file);
 
-        $form.attr("action", appUrl.forDatabaseQuery(this.db) + url);
-        
-        $changeVector.val(JSON.stringify(payload));
-        $form.submit();
+        downloader.canDownload(url, { method: "POST", body: JSON.stringify(payload) }).then((canDownload) => {
+            if (canDownload) {
+                $form.attr("action", url);
+                $changeVector.val(JSON.stringify(payload));
+                $form.submit();
+            }
+        });
     }
 
     private afterUpload() {

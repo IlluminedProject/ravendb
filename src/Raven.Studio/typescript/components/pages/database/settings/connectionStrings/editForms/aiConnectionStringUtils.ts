@@ -7,7 +7,7 @@ import _ from "lodash";
 
 type AiConnectionString = Raven.Client.Documents.Operations.AI.AiConnectionString;
 type AiConnectorType = Raven.Client.Documents.Operations.AI.AiConnectorType;
-type AiConnectionSetting = Exclude<keyof AiConnectionString, "Type" | "Identifier" | "ModelType" | "Name">;
+type AiConnectionSetting = Exclude<keyof AiConnectionString, "Type" | "Identifier" | "ModelType" | "Name" | "UsedBy">;
 
 const getConnectorType = (connection: AiConnectionString): AiConnectorType => {
     const mapping: Record<AiConnectionSetting, AiConnectorType> = {
@@ -156,6 +156,7 @@ const schema = yupObjectSchema<FormData>({
             }),
         dimensions: getDimensionsSchema("azureOpenAiSettings"),
         embeddingsMaxConcurrentBatches: getEmbeddingsMaxConcurrentBatchesSchema("azureOpenAiSettings"),
+        enablePromptCache: yup.boolean().nullable(),
         isSetTemperature: yup.boolean().nullable(),
         temperature: getTemperatureSchema("azureOpenAiSettings"),
     }),
@@ -178,6 +179,7 @@ const schema = yupObjectSchema<FormData>({
             }),
         dimensions: getDimensionsSchema("googleSettings"),
         embeddingsMaxConcurrentBatches: getEmbeddingsMaxConcurrentBatchesSchema("googleSettings"),
+        enablePromptCache: yup.boolean().nullable(),
     }),
     huggingFaceSettings: yupObjectSchema<FormData["huggingFaceSettings"]>({
         apiKey: yup
@@ -238,8 +240,10 @@ const schema = yupObjectSchema<FormData>({
             }),
         organizationId: yup.string().nullable(),
         projectId: yup.string().nullable(),
+        reasoningEffort: yup.string().nullable(),
         dimensions: getDimensionsSchema("openAiSettings"),
         embeddingsMaxConcurrentBatches: getEmbeddingsMaxConcurrentBatchesSchema("openAiSettings"),
+        enablePromptCache: yup.boolean().nullable(),
         isSetTemperature: yup.boolean().nullable(),
         temperature: getTemperatureSchema("openAiSettings"),
     }),
@@ -292,6 +296,7 @@ const schema = yupObjectSchema<FormData>({
             }),
         embeddingsMaxConcurrentBatches: getEmbeddingsMaxConcurrentBatchesSchema("mistralAiSettings"),
     }),
+    excludedDatabases: yup.array().of(yup.string()).optional(),
 });
 
 function getDefaultValues(initialConnection: AiConnection, isForNewConnection: boolean): FormData {
@@ -308,6 +313,7 @@ function getDefaultValues(initialConnection: AiConnection, isForNewConnection: b
                 deploymentName: null,
                 dimensions: null,
                 embeddingsMaxConcurrentBatches: null,
+                enablePromptCache: null,
                 isSetTemperature: false,
                 temperature: null,
             } satisfies Required<FormData["azureOpenAiSettings"]>,
@@ -318,6 +324,7 @@ function getDefaultValues(initialConnection: AiConnection, isForNewConnection: b
                 dimensions: null,
                 endpoint: null,
                 embeddingsMaxConcurrentBatches: null,
+                enablePromptCache: null,
             } satisfies Required<FormData["googleSettings"]>,
             huggingFaceSettings: {
                 apiKey: null,
@@ -342,8 +349,10 @@ function getDefaultValues(initialConnection: AiConnection, isForNewConnection: b
                 model: null,
                 organizationId: null,
                 projectId: null,
+                reasoningEffort: null,
                 dimensions: null,
                 embeddingsMaxConcurrentBatches: null,
+                enablePromptCache: null,
                 isSetTemperature: false,
                 temperature: null,
             } satisfies Required<FormData["openAiSettings"]>,
@@ -363,7 +372,7 @@ function getDefaultValues(initialConnection: AiConnection, isForNewConnection: b
         };
     }
 
-    return _.omit(initialConnection, "type", "usedByTasks");
+    return _.omit(initialConnection, "type", "usedBy");
 }
 
 export const aiConnectionStringUtils = {

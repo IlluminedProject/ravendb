@@ -1,6 +1,7 @@
 //  Main Menu
 $menu-width: 280px;
 $menu-transition-ease: 0.4s cubic-bezier(0.21, 0.88, 0.35, 1);
+$collections-list-shrink-limit: 200px;
 #main-menu {
     z-index: 1040;
     position: sticky;
@@ -37,7 +38,7 @@ $menu-transition-ease: 0.4s cubic-bezier(0.21, 0.88, 0.35, 1);
         display: inline;
     }
     h2 {
-        padding: 0 $gutter-sm;
+        padding: 0 $gutter-xs;
         color: $text-color-var;
         margin: 0;
         font-size: 18px;
@@ -241,6 +242,16 @@ $menu-transition-ease: 0.4s cubic-bezier(0.21, 0.88, 0.35, 1);
             -webkit-transform-origin: 0 0;
             transform-origin: 0 0;
         }
+        li {
+            a {
+                padding: $gutter-xxs;
+                margin: $gutter-xxxs;
+                border-radius: $gutter-xxxs;
+            }
+        }
+        h3 {
+            padding-left: $gutter-xs;
+        }
         a {
             &:hover {
                 background-color: $base-panel-bg-2;
@@ -248,8 +259,90 @@ $menu-transition-ease: 0.4s cubic-bezier(0.21, 0.88, 0.35, 1);
         }
     }
     .collections-list {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 content;
+        // With flex-basis: content, height only sets the shrink limit: min(content, $collections-list-shrink-limit)
+        height: $collections-list-shrink-limit;
+
+        & > ul {
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
         a {
             padding: $gutter-xxs $gutter-sm;
+        }
+        .system-group-header {
+            cursor: pointer;
+            color: $text-muted-var;
+
+            i {
+                display: inline-block;
+                font-size: 10px;
+                margin-right: $gutter-xxxs;
+                flex-shrink: 0;
+                transition: transform 0.15s ease-out;
+            }
+
+            &.expanded i {
+                transform: rotate(90deg);
+            }
+        }
+        .system-collection-items-wrapper {
+            display: grid;
+            grid-template-rows: 0fr;
+            transition: grid-template-rows 0.2s ease-out;
+
+            .system-collection-items-inner {
+                min-height: 0;
+                overflow: hidden;
+                visibility: hidden;
+                transition: visibility 0.2s;
+            }
+
+            &.expanded {
+                grid-template-rows: 1fr;
+
+                .system-collection-items-inner {
+                    visibility: visible;
+                }
+            }
+        }
+        .system-collection-items {
+            --tree-spacing: #{$gutter-sm};
+            --tree-radius: #{$gutter-xxxs};
+            --tree-line-color: #{$border-color-light-var};
+            list-style: none;
+            padding-left: 0;
+            margin: 0;
+            margin-left: calc(#{$gutter-xs} + 3px);
+
+            li {
+                position: relative;
+                border-left: 2px solid var(--tree-line-color);
+
+                &:last-child {
+                    border-color: transparent;
+                }
+
+                &::before {
+                    content: "";
+                    display: block;
+                    position: absolute;
+                    top: calc(var(--tree-spacing) / -4);
+                    left: -2px;
+                    width: calc(var(--tree-spacing) + 2px);
+                    height: calc(var(--tree-spacing) + 3px);
+                    border: solid var(--tree-line-color);
+                    border-width: 0 0 2px 2px;
+                    border-bottom-left-radius: var(--tree-radius);
+                }
+
+                a {
+                    margin-left: var(--tree-spacing);
+                }
+            }
         }
     }
     // Document Collections

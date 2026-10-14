@@ -1,22 +1,26 @@
 import "./VirtualTable.scss";
 import { useRef } from "react";
-import { FilterFn, flexRender, Row } from "@tanstack/react-table";
+import { FilterFn, Row } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ClassNameProps } from "components/models/common";
 import VirtualTableBodyWrapper, { VirtualTableBodyWrapperProps } from "./partials/VirtualTableBodyWrapper";
+import VirtualTableCells from "./partials/VirtualTableCells";
 import { virtualTableConstants } from "components/common/virtualTable/utils/virtualTableConstants";
 import classNames from "classnames";
 import { values } from "lodash";
 
 // Chrome/Edge can render up to 838 859 rows in a table
 // Firefox only up to 223 695 rows
-// If you want to render more rows, you need to use VirtualTableWithLazyLoading component along with useVirtualTableWithLazyLoading hook
+// If you want to render more rows (or fetch them on scroll), use LazyVirtualTable component along with useLazyRows hook
 
 // May have performance problems but only in dev mode (prod build works fine)
 
 interface VirtualTableProps<T> extends Omit<VirtualTableBodyWrapperProps<T>, "tableContainerRef"> {
     overscan?: number;
+    rowHeightInPx?: number;
     tableContainerRef?: React.RefObject<HTMLDivElement>;
+    onRowClick?: (row: Row<T>) => void;
+    getRowClassName?: (row: Row<T>) => string;
 }
 
 export default function VirtualTable<T>(props: VirtualTableProps<T> & ClassNameProps) {
@@ -25,10 +29,17 @@ export default function VirtualTable<T>(props: VirtualTableProps<T> & ClassNameP
         className,
         heightInPx = 300,
         overscan = 5,
+        rowHeightInPx,
         isLoading = false,
+        isEmpty,
+        emptyMessage,
+        onScroll,
+        overlay,
         isCompact,
         isRoundingDisabled,
         isPaddingDisabled,
+        onRowClick,
+        getRowClassName,
     } = props;
 
     const innerTableContainerRef = useRef<HTMLDivElement>(null);
@@ -53,7 +64,8 @@ export default function VirtualTable<T>(props: VirtualTableProps<T> & ClassNameP
     const rowVirtualizer = useVirtualizer({
         count: rows.length,
         estimateSize: () =>
-            isCompact ? virtualTableConstants.compactRowHeightInPx : virtualTableConstants.defaultRowHeightInPx,
+            rowHeightInPx ??
+            (isCompact ? virtualTableConstants.compactRowHeightInPx : virtualTableConstants.defaultRowHeightInPx),
         getScrollElement: () => tableContainerRef.current,
         overscan,
     });
@@ -64,6 +76,10 @@ export default function VirtualTable<T>(props: VirtualTableProps<T> & ClassNameP
             className={className}
             tableContainerRef={tableContainerRef}
             isLoading={isLoading}
+            isEmpty={isEmpty}
+            emptyMessage={emptyMessage}
+            onScroll={onScroll}
+            overlay={overlay}
             heightInPx={heightInPx}
             isCompact={isCompact}
             isRoundingDisabled={isRoundingDisabled}
@@ -81,24 +97,14 @@ export default function VirtualTable<T>(props: VirtualTableProps<T> & ClassNameP
                             data-index={virtualRow.index}
                             ref={(node) => rowVirtualizer.measureElement(node)}
                             key={row.id}
+                            onClick={onRowClick ? () => onRowClick(row) : undefined}
                             style={{
                                 transform: `translateY(${virtualRow.start}px)`,
                                 height: `${virtualRow.size}px`,
                             }}
-                            className={classNames({ "is-odd": virtualRow.index % 2 !== 0 })}
+                            className={classNames({ "is-odd": virtualRow.index % 2 !== 0 }, getRowClassName?.(row))}
                         >
-                            {row.getVisibleCells().map((cell) => (
-                                <td
-                                    key={cell.id}
-                                    style={{
-                                        width: cell.column.getSize(),
-                                        padding: isCompact ? "0px 7.5px" : undefined,
-                                    }}
-                                    className={classNames("d-flex align-items-center", { "font-size-11": isCompact })}
-                                >
-                                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                                </td>
-                            ))}
+                            <VirtualTableCells row={row} isCompact={isCompact} />
                         </tr>
                     );
                 })}

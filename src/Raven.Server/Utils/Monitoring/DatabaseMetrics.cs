@@ -15,6 +15,9 @@ namespace Raven.Server.Utils.Monitoring
         public DatabaseStatistics Statistics { get; set; } 
         public DatabaseIndexesMetrics Indexes { get; set; }
         public DatabaseStorageMetrics Storage { get; set; }
+        public DatabaseEtlsMetrics Etls { get; set; }
+        public DatabaseAiTasksMetrics AiTasks { get; set; }
+        public DatabaseCdcSinksMetrics CdcSinks { get; set; }
 
         public DynamicJsonValue ToJson()
         {
@@ -27,7 +30,10 @@ namespace Raven.Server.Utils.Monitoring
                 [nameof(Counts)] = Counts.ToJson(),
                 [nameof(Statistics)] = Statistics.ToJson(),
                 [nameof(Indexes)] = Indexes.ToJson(),
-                [nameof(Storage)] = Storage.ToJson()
+                [nameof(Storage)] = Storage.ToJson(),
+                [nameof(Etls)] = Etls.ToJson(),
+                [nameof(AiTasks)] = AiTasks.ToJson(),
+                [nameof(CdcSinks)] = CdcSinks.ToJson()
             };
         }
     }
@@ -144,6 +150,69 @@ namespace Raven.Server.Utils.Monitoring
         }
     }
     
+    public sealed class DatabaseEtlsMetrics
+    {
+        public long Count { get; set; }
+        public long ErrorsCount { get; set; }
+        public long HealthyEtlsCount { get; set; }
+        public long ImpairedEtlsCount { get; set; }
+        public long FailedEtlsCount { get; set; }
+        
+        public DynamicJsonValue ToJson()
+        {
+            return new DynamicJsonValue
+            {
+                [nameof(Count)] = Count,
+                [nameof(ErrorsCount)] = ErrorsCount,
+                [nameof(HealthyEtlsCount)] = HealthyEtlsCount,
+                [nameof(ImpairedEtlsCount)] = ImpairedEtlsCount,
+                [nameof(FailedEtlsCount)] = FailedEtlsCount
+            };
+        }
+    }
+
+    public sealed class DatabaseAiTasksMetrics
+    {
+        public long Count { get; set; }
+        public long ErrorsCount { get; set; }
+        public long HealthyTasksCount { get; set; }
+        public long ImpairedTasksCount { get; set; }
+        public long FailedTasksCount { get; set; }
+
+        public DynamicJsonValue ToJson()
+        {
+            return new DynamicJsonValue
+            {
+                [nameof(Count)] = Count,
+                [nameof(ErrorsCount)] = ErrorsCount,
+                [nameof(HealthyTasksCount)] = HealthyTasksCount,
+                [nameof(ImpairedTasksCount)] = ImpairedTasksCount,
+                [nameof(FailedTasksCount)] = FailedTasksCount
+            };
+        }
+    }
+
+    public sealed class DatabaseCdcSinksMetrics
+    {
+        public long Count { get; set; }
+        public long ErrorsCount { get; set; }
+        public long HealthyCdcSinksCount { get; set; }
+        public long ImpairedCdcSinksCount { get; set; }
+        public long FailedCdcSinksCount { get; set; }
+
+        public DynamicJsonValue ToJson()
+        {
+            return new DynamicJsonValue
+            {
+                [nameof(Count)] = Count,
+                [nameof(ErrorsCount)] = ErrorsCount,
+                [nameof(HealthyCdcSinksCount)] = HealthyCdcSinksCount,
+                [nameof(ImpairedCdcSinksCount)] = ImpairedCdcSinksCount,
+                [nameof(FailedCdcSinksCount)] = FailedCdcSinksCount
+            };
+        }
+    }
+
     public sealed class DatabasesMetrics
     {
         public List<DatabaseMetrics> Results { get; set; } = new List<DatabaseMetrics>();

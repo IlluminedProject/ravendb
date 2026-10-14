@@ -249,13 +249,6 @@ namespace Raven.Server
                     LogTrafficWatch(context, sp?.ElapsedMilliseconds ?? 0, database);
                 }
 
-                if (sp != null && requestHandlerContext.HttpContext.WebSockets.IsWebSocketRequest == false) // exclude web sockets
-                {
-                    var requestDuration = sp.ElapsedMilliseconds;
-                    requestHandlerContext.RavenServer?.Metrics.Requests.RecordRequest(requestDuration);
-                    requestHandlerContext.DatabaseMetrics?.Requests.RecordRequest(requestDuration);
-                }
-
                 if (_logger.IsDebugEnabled && SkipHttpLogging == false)
                 {
                     _logger.Debug($"{context.Request.Method} {context.Request.Path.Value}{context.Request.QueryString.Value} - {context.Response.StatusCode} - {(sp?.ElapsedMilliseconds ?? 0):#,#;;0} ms", exception);
@@ -323,6 +316,9 @@ namespace Raven.Server
 
             var timings = context.Items[nameof(QueryTimings)];
 
+            var auth = context.Features.Get<Microsoft.AspNetCore.Http.Features.Authentication.IHttpAuthenticationFeature>() as RavenServer.AuthenticateConnection;
+            var (clientIp, proxyIp) = SsoForwardedForHelper.GetIps(context, auth);
+
             var twn = new TrafficWatchHttpChange
             {
                 TimeStamp = DateTime.UtcNow,
@@ -336,8 +332,11 @@ namespace Raven.Server
                 CustomInfo = twTuple.CustomInfo,
                 QueryTimings = timings != null ? (QueryTimings)timings : null,
                 Type = twTuple.Type,
-                ClientIP = context.Connection.RemoteIpAddress?.ToString(),
+                ClientIP = clientIp,
+                ProxyIP = proxyIp,
                 CertificateThumbprint = context.Connection.ClientCertificate?.Thumbprint,
+                CertificateName = auth?.Definition?.Name,
+                SsoUserIdentity = auth?.SsoUserIdentity,
                 RequestSizeInBytes = ((StreamWithTimeout)context.Items["RequestStream"])?.TotalRead ?? 0,
                 ResponseSizeInBytes = ((StreamWithTimeout)context.Items["ResponseStream"])?.TotalWritten ?? 0,
             };

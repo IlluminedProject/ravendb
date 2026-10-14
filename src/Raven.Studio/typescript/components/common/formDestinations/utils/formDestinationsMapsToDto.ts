@@ -57,12 +57,29 @@ export function mapS3ToDto(destination: S3Destination): Raven.Client.Documents.O
     const forcePathStyle =
         !destination.config.isOverrideConfig && destination.isUseCustomHost ? destination.forcePathStyle : undefined;
 
+    const disableChecksumValidation =
+        !destination.config.isOverrideConfig && destination.isUseCustomHost
+            ? destination.disableChecksumValidation
+            : undefined;
+
     return {
         ...mapBackupSettingsToDto(destination),
         ...mapAmazonToDto(destination),
         CustomServerUrl: customServerUrl,
         ForcePathStyle: forcePathStyle,
+        DisableChecksumValidation: disableChecksumValidation,
         BucketName: destination.bucketName,
+    };
+}
+
+export function mapAzureCredentialsToDto(
+    destination: Pick<AzureDestination, "authType" | "accountKey" | "sasToken">
+): Pick<Raven.Client.Documents.Operations.Backups.AzureSettings, "AccountKey" | "SasToken"> {
+    const isSasToken = destination.authType === "sasToken";
+
+    return {
+        AccountKey: isSasToken ? null : destination.accountKey,
+        SasToken: isSasToken ? destination.sasToken : null,
     };
 }
 
@@ -73,11 +90,10 @@ export function mapAzureToDto(destination: AzureDestination): Raven.Client.Docum
 
     return {
         ...mapBackupSettingsToDto(destination),
+        ...mapAzureCredentialsToDto(destination),
         StorageContainer: destination.storageContainer,
         RemoteFolderName: destination.remoteFolderName,
         AccountName: destination.accountName,
-        AccountKey: destination.accountKey,
-        SasToken: destination.sasToken,
     };
 }
 

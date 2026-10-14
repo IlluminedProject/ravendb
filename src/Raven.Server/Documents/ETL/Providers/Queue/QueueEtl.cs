@@ -20,6 +20,7 @@ using Raven.Server.Documents.TransactionMerger.Commands;
 using Raven.Server.Exceptions.ETL.QueueEtl;
 using Raven.Server.ServerWide;
 using Raven.Server.ServerWide.Context;
+using Raven.Server.Documents.TasksErrors;
 
 namespace Raven.Server.Documents.ETL.Providers.Queue;
 
@@ -173,9 +174,11 @@ public abstract class QueueEtl<T> : EtlProcess<QueueItem, QueueWithItems<T>, Que
             summaries.Add(new QueueSummary { QueueName = record.Name, Messages = messages });
         }
 
+        var etlItemErrors = Statistics.ReadInMemoryItemErrors();
+
         return new QueueEtlTestScriptResult
         {
-            TransformationErrors = Statistics.TransformationErrorsInCurrentBatch.Errors.ToList(),
+            TransformationErrors = etlItemErrors.Where(x => x.Step == TaskErrorStep.Transformation).ToList(),
             Summary = summaries
         };
     }

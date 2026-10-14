@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Net.Http.Headers;
 using Raven.Client.Documents.AI;
 using Raven.Client.Documents.Operations.AI.Agents;
+using Raven.Server.Documents.AI;
 using Raven.Client.Exceptions;
 using Raven.Client.Exceptions.Documents.Attachments;
 using Raven.Server.Documents.Handlers.Batches;
@@ -32,6 +33,8 @@ namespace Raven.Server.Documents.Handlers.AI.Agents
             var agentId = RequestHandler.GetStringQueryString("agentId");
             var streaming = RequestHandler.GetBoolValueQueryString("streaming", required: false) ?? false;
             var changeVector = RequestHandler.GetChangeVectorStringQueryString("changeVector", required: false);
+            var debugOverride = RequestHandler.GetBoolValueQueryString("debug", required: false);
+            var cancelPendingActionTools = RequestHandler.GetBoolValueQueryString("cancelPendingActionTools", required: false) ?? false;
 
             AiAgentConfiguration configuration = GetAiAgentConfiguration(agentId);
 
@@ -45,48 +48,52 @@ namespace Raven.Server.Documents.Handlers.AI.Agents
                 Authentication = RequestHandler.HttpContext.Features.Get<IHttpAuthenticationFeature>() as RavenServer.AuthenticateConnection
             };
 
-            await ExecuteInternalAsync(handler, context, configuration, conversationId, body, changeVector, streaming, token);
+            await ExecuteInternalAsync(handler, context, configuration, conversationId, body, changeVector, streaming, debugOverride, cancelPendingActionTools, token);
         }
 
         protected async Task ExecuteInternalAsync(ConversationHandler handler, DocumentsOperationContext context, AiAgentConfiguration configuration, string conversationId, RequestBody body, string changeVector,
-            bool streaming, OperationCancelToken token)
+            bool streaming, bool? debugOverride, bool cancelPendingActionTools, OperationCancelToken token)
         {
-            handler.Initialize(configuration, conversationId, body, changeVector, RequestHandler.GetRaftRequestIdFromQuery());
+            handler.Initialize(configuration, conversationId, body, changeVector, RequestHandler.GetRaftRequestIdFromQuery(), debugOverride, cancelPendingActionTools);
             AiInternalConversationResult r;
 
-            if (streaming)
+            try
             {
-                var streamPropertyPath = RequestHandler.GetStringQueryString("streamPropertyPath");
-                HttpContext.Response.Headers.ContentType = "text/event-stream";
-                RequestHandler.DisableResponseBuffering();
+                if (streaming)
+                {
+                    var streamPropertyPath = RequestHandler.GetStringQueryString("streamPropertyPath", required: handler.Schema != null);
+                    HttpContext.Response.Headers.ContentType = "text/event-stream";
+                    RequestHandler.DisableResponseBuffering();
 
-                r = await handler.HandleStreamingRequest(context, RequestHandler.ResponseBodyStream(), streamPropertyPath, token.Token);
+                    r = await handler.HandleStreamingRequestAsync(context, RequestHandler.ResponseBodyStream(), streamPropertyPath, token.Token);
+                }
+                else
+                {
+                    r = await handler.HandleRequestAsync(context, token.Token);
+                }
             }
-            else
+            catch (ConcurrencyException)
             {
-                try
+                throw;
+            }
+            catch (MissingAiAgentParameterException)
+            {
+                throw;
+            }
+            catch (QueryToolFailedException)
+            {
+                throw;
+            }
+            catch (AttachmentDoesNotExistException)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                throw new AiException($"Failed to communicate with the agent '{configuration.Identifier}', conversation: '{conversationId}'.", e)
                 {
-                    r = await handler.HandleRequest(context, token.Token);
-                }
-                catch (ConcurrencyException)
-                {
-                    throw;
-                }
-                catch (MissingAiAgentParameterException)
-                {
-                    throw;
-                }
-                catch (AttachmentDoesNotExistException)
-                {
-                    throw;
-                }
-                catch (Exception e)
-                {
-                    throw new AiException($"Failed to communicate with the agent '{configuration.Identifier}', conversation: '{conversationId}'.", e)
-                    {
-                        RequestId = RequestHandler.HttpContext.Response.Headers.RequestId
-                    };
-                }
+                    RequestId = RequestHandler.HttpContext.Response.Headers.RequestId
+                };
             }
 
             await using var writer = new AsyncBlittableJsonTextWriter(context, RequestHandler.ResponseBodyStream());
@@ -125,14 +132,17 @@ namespace Raven.Server.Documents.Handlers.AI.Agents
                 MaxModelIterationsPerCall = maxModelIterationsPerCall
             };
 
-            return new RequestBody
+            var request = new RequestBody
             {
                 ActionResponses = actionResponses,
                 ArtificialActions = artificialActions,
                 UserPrompt = userPrompt,
                 Parameters = parameters,
-                CreationOptions = options
+                CreationOptions = options,
+                OutputOptions = AiServerOutputOptions.From(body)
             };
+
+            return request;
         }
 
         public async Task<RequestBody> ReadRequestBodyAsync(DocumentsOperationContext context, string destinationDocumentId, CancellationToken token)

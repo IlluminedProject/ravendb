@@ -11,6 +11,7 @@ import {
 } from "components/common/RichPanel";
 import {
     ConnectionStringItem,
+    DestinationUrlItem,
     OngoingTaskActions,
     OngoingTaskName,
     OngoingTaskResponsibleNode,
@@ -35,9 +36,7 @@ function Details(props: ExternalReplicationPanelProps & { canEdit: boolean }) {
     const showDelayReplication = data.shared.delayReplicationTime > 0;
     const delayHumane = genUtils.formatTimeSpan(1000 * (data.shared.delayReplicationTime ?? 0), true);
     const connectionStringDefined = !!data.shared.destinationDatabase;
-    const { appUrl } = useAppUrls();
     const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
-    const connectionStringsUrl = appUrl.forConnectionStrings(databaseName, "Raven", data.shared.connectionStringName);
 
     return (
         <RichPanelDetails>
@@ -48,22 +47,15 @@ function Details(props: ExternalReplicationPanelProps & { canEdit: boolean }) {
                 connectionStringDefined={!!data.shared.destinationDatabase}
                 canEdit={canEdit}
                 connectionStringName={data.shared.connectionStringName}
-                connectionStringsUrl={connectionStringsUrl}
+                connectionStringType="Raven"
+                databaseName={databaseName}
             />
             {connectionStringDefined && (
                 <RichPanelDetailItem label="Destination Database">
                     {data.shared.destinationDatabase}
                 </RichPanelDetailItem>
             )}
-            <RichPanelDetailItem label="Actual Destination URL">
-                {data.shared.destinationUrl ? (
-                    <a href={data.shared.destinationUrl} target="_blank">
-                        {data.shared.destinationUrl}
-                    </a>
-                ) : (
-                    <div>N/A</div>
-                )}
-            </RichPanelDetailItem>
+            <DestinationUrlItem destinationUrl={data.shared.destinationUrl} label="Actual Destination URL" />
             {data.shared.topologyDiscoveryUrls?.length > 0 && (
                 <RichPanelDetailItem label="Topology Discovery URLs">
                     {data.shared.topologyDiscoveryUrls.join(", ")}

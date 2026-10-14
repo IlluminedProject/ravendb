@@ -12,15 +12,29 @@ import AnalyzerDefinition = Raven.Client.Documents.Indexes.Analysis.AnalyzerDefi
 import DataArchival = Raven.Client.Documents.Operations.DataArchival.DataArchivalConfiguration;
 import document from "models/database/documents/document";
 import { RevisionsPreviewResultItem } from "commands/database/documents/getRevisionsPreviewCommand";
+import CompareExchangeListItem = Raven.Server.Web.System.Processors.CompareExchange.CompareExchangeHandlerProcessorForGetCompareExchangeValues.CompareExchangeListItem;
+import { DatabaseSharedInfo } from "components/models/databases";
 
 interface WithGetDatabasesStateOptions {
     loadError?: string[];
     offlineNodes?: string[];
 }
 
+function getDatabaseNamesForNode(nodeTag: string, db: DatabaseSharedInfo): string[] {
+    if (db.isSharded) {
+        return db.shards.map((x) => (x.nodes.some((n) => n.tag === nodeTag) ? x.name : null)).filter((x) => x);
+    }
+
+    return db.nodes.some((x) => x.tag === nodeTag) ? [db.name] : [];
+}
+
 export default class MockDatabasesService extends AutoMockService<DatabasesService> {
     constructor() {
         super(new DatabasesService());
+    }
+
+    withGetDatabasesStateForDatabase(db: DatabaseSharedInfo, options: WithGetDatabasesStateOptions = {}) {
+        return this.withGetDatabasesState((nodeTag) => getDatabaseNamesForNode(nodeTag, db), options);
     }
 
     withGetDatabasesState(
@@ -188,6 +202,49 @@ export default class MockDatabasesService extends AutoMockService<DatabasesServi
         return this.mockResolvedValue(this.mocks.getIdentities, dto, DatabasesStubs.getIdentities(5));
     }
 
+    /**
+     * Pages compare exchange items lazily, so huge counts (e.g. millions) don't get materialized
+     * up-front like a static resolved value would. Filtering by prefix is applied before skip/take
+     * so that partial (filtered) pages correctly signal "no more data" via items.length < take.
+     */
+    withPagedGetCompareExchangeItems(itemsCount: number) {
+        const makeItem = (i: number): CompareExchangeListItem => ({
+            Key: `products/${i + 1}-a`,
+            Value: {
+                Object: i + 1,
+                "@metadata": undefined as any,
+            },
+            Index: 20,
+        });
+
+        this.mocks.getCompareExchangeItems.mockImplementation(async (_database, prefix, start, take) => {
+            const items: CompareExchangeListItem[] = [];
+
+            if (!prefix) {
+                for (let i = start; i < Math.min(start + take, itemsCount) && items.length < take; i++) {
+                    items.push(makeItem(i));
+                }
+            } else {
+                let skipped = 0;
+                for (let i = 0; i < itemsCount && items.length < take; i++) {
+                    const item = makeItem(i);
+                    if (item.Key.startsWith(prefix)) {
+                        if (skipped < start) {
+                            skipped++;
+                        } else {
+                            items.push(item);
+                        }
+                    }
+                }
+            }
+
+            return {
+                totalResultCount: -1,
+                items,
+            };
+        });
+    }
+
     withRevisionsBinCleanerConfiguration(
         dto?: MockedValue<Raven.Client.Documents.Operations.Revisions.RevisionsBinConfiguration>
     ) {
@@ -202,6 +259,28 @@ export default class MockDatabasesService extends AutoMockService<DatabasesServi
         return this.mockResolvedValue(this.mocks.getRevisionsPreview, dto, DatabasesStubs.revisionsPreview());
     }
 
+    withDocumentsPreview(dto?: MockedValue<pagedResultWithAvailableColumns<document>>) {
+        return this.mockResolvedValue(this.mocks.getDocumentsPreview, dto, DatabasesStubs.documentsPreview());
+    }
+
+    withGeneratedDocumentsPreview(totalCount: number) {
+        this.mocks.getDocumentsPreview.mockImplementation(
+            async (_database, skip, take, collectionName, _previewBindings, _fullBindings, continuationToken) => {
+                const start = continuationToken ? Number(continuationToken) : skip;
+                const count = Math.max(0, Math.min(take, totalCount - start));
+                const next = start + count;
+
+                return {
+                    items: DatabasesStubs.documentsPreviewItems(start, count, collectionName),
+                    totalResultCount: totalCount,
+                    availableColumns: DatabasesStubs.documentsPreviewColumns(),
+                    continuationToken: next < totalCount ? String(next) : null,
+                    resultEtag: "1",
+                };
+            }
+        );
+    }
+
     withDocumentWithMetadata(dto?: MockedValue<any>) {
         return this.mockResolvedValue(this.mocks.getDocumentWithMetadata, dto, new document({ Name: "some-name" }));
     }
@@ -213,6 +292,14 @@ export default class MockDatabasesService extends AutoMockService<DatabasesServi
             this.mocks.getRemoteAttachmentsConfiguration,
             dto,
             DatabasesStubs.remoteAttachmentsConfiguration()
+        );
+    }
+
+    withGetRemoteAttachmentsDestinations(dto?: MockedValue<RemoteAttachmentsStudioConfiguration>) {
+        return this.mockResolvedValue(
+            this.mocks.getRemoteAttachmentsDestinations,
+            dto,
+            DatabasesStubs.remoteAttachmentsStudioConfiguration()
         );
     }
 

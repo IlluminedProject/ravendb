@@ -1,4 +1,4 @@
-import { Meta, StoryObj } from "@storybook/react/*";
+import { Meta, StoryObj } from "@storybook/react-webpack5";
 import Certificates from "components/pages/resources/manageServer/certificates/Certificates";
 import { MockedValue } from "test/mocks/services/AutoMockService";
 import { mockServices } from "test/mocks/services/MockServices";
@@ -53,7 +53,7 @@ export const CertificatesStory: StoryObj<CertificatesStoryArgs> = {
         securityClearance: "ClusterAdmin",
         isSecureServer: true,
         hasReadOnlyCertificates: true,
-        certificates: ManageServerStubs.certificates(),
+        certificates: ManageServerStubs.certificatesWithSso(),
         serverCertSetupMode: ManageServerStubs.serverCertificateSetupMode(),
         serverCertRenewalDate: ManageServerStubs.serverCertificateRenewalDate(),
     },

@@ -13,6 +13,7 @@ using Raven.Client.Http;
 using Raven.Client.ServerWide;
 using Raven.Client.ServerWide.Sharding;
 using Raven.Client.Util;
+using Raven.Server.Commercial.WriteUsageMetering;
 using Raven.Server.Config;
 using Raven.Server.Config.Settings;
 using Raven.Server.NotificationCenter;
@@ -26,7 +27,9 @@ using Raven.Server.ServerWide.Context;
 using Raven.Server.ServerWide.Maintenance.Sharding;
 using Raven.Server.Utils;
 using Sparrow;
+using Sparrow.Platform;
 using Sparrow.Server.Utils;
+using Sparrow.Utils;
 
 namespace Raven.Server.ServerWide.Maintenance
 {
@@ -92,13 +95,20 @@ namespace Raven.Server.ServerWide.Maintenance
             }, null, ThreadNames.ForClusterObserver($"Cluster observer for term {_term}", _term));
         }
 
+        internal int _clusterTransactionsCleanupBatchSize = PlatformDetails.Is32Bits ? 1 * 1024 : 10 * 1024;
+
         public bool Suspended = false; // don't really care about concurrency here
+
+        // Leader's latest write-usage snapshot, swapped atomically for the sender thread to read.
+        private volatile WriteUsageSnapshot _latestWriteUsageSnapshot;
+        public WriteUsageSnapshot LatestWriteUsageSnapshot => _latestWriteUsageSnapshot;
+
         internal long _iteration;
         private readonly long _term;
         private long _lastIndexCleanupTimeInTicks;
         internal long _lastTombstonesCleanupTimeInTicks;
         internal long _lastExpiredCompareExchangeCleanupTimeInTicks;
-        private bool _hasMoreTombstones = false;
+
 
         public (ClusterObserverLogEntry[] List, long Iteration) ReadDecisionsForDatabase()
         {
@@ -169,6 +179,9 @@ namespace Raven.Server.ServerWide.Maintenance
             List<DestinationMigrationConfirmCommand> confirmCommands = null;
             List<string> databases;
 
+            var writeUsageSnapshots = new List<WriteUsageApplicationSnapshot>();
+            var quillApplications = GetQuillApplicationNames(newStats);
+
             using (_contextPool.AllocateOperationContext(out ClusterOperationContext context))
             using (context.OpenReadTransaction())
             {
@@ -179,9 +192,12 @@ namespace Raven.Server.ServerWide.Maintenance
             var cleanupIndexes = now.Ticks - _lastIndexCleanupTimeInTicks >= _server.Configuration.Indexing.CleanupInterval.AsTimeSpan.Ticks;
             var cleanupTombstones = now.Ticks - _lastTombstonesCleanupTimeInTicks >= _server.Configuration.Cluster.CompareExchangeTombstonesCleanupInterval.AsTimeSpan.Ticks;
             var cleanupExpiredCompareExchange = now.Ticks - _lastExpiredCompareExchangeCleanupTimeInTicks >= _server.Configuration.Cluster.CompareExchangeExpiredCleanupInterval.AsTimeSpan.Ticks;
+            var hasMoreTombstones = false;
 
             foreach (var database in databases)
             {
+                var reportUsage = quillApplications != null && quillApplications.Contains(database);
+
                 using (_contextPool.AllocateOperationContext(out ClusterOperationContext context))
                 using (context.OpenReadTransaction())
                 {
@@ -235,6 +251,48 @@ namespace Raven.Server.ServerWide.Maintenance
                         {
                             var state = new DatabaseObservationState(topology.Name, rawRecord, topology.Topology, clusterTopology, newStats, prevStats, etag, _iteration);
 
+                            if (reportUsage)
+                            {
+                                // Collect the current write-usage values for this topology (database or shard):
+                                // one entry per topology, carrying the MEMBER change vectors merged into a single
+                                // cluster-wide change vector.
+                                var memberChangeVectors = new List<string>();
+                                var complete = true;
+                                var nodeSnapshots = new List<WriteUsageNodeSnapshot>();
+
+                                foreach (var member in state.DatabaseTopology.Members)
+                                {
+                                    var memberReport = state.GetCurrentDatabaseReport(member);
+                                    if (memberReport == null)
+                                        continue;
+
+                                    // A member that isn't holding the database open - unloaded after going idle,
+                                    // still loading, faulted - reports no change vector at all, while a loaded
+                                    // database with no writes reports an empty one. Merging that gap in would
+                                    // understate the usage, and if every member is idle it would collapse to
+                                    // empty and read as a reset rather than a pause. Report nothing for this
+                                    // topology instead and pick it up again once the members are back.
+                                    if (memberReport.DatabaseChangeVector == null)
+                                    {
+                                        complete = false;
+                                        break;
+                                    }
+
+                                    memberChangeVectors.Add(ChangeVector.StripMoveTag(memberReport.DatabaseChangeVector, context).AsString());
+
+                                    if (string.IsNullOrEmpty(memberReport.DatabaseId))
+                                        continue;
+
+                                    nodeSnapshots.Add(new WriteUsageNodeSnapshot(memberReport.DatabaseId, memberReport.LastEtag, memberReport.SystemCollections));
+                                }
+
+                                if (complete)
+                                {
+                                    var mergedChangeVector = ChangeVectorUtils.MergeVectors(memberChangeVectors);
+                                    writeUsageSnapshots.Add(new WriteUsageApplicationSnapshot(state.Name, state.DatabaseTopology.DatabaseTopologyIdBase64, mergedChangeVector, nodeSnapshots));
+                                }
+                            }
+
                             try
                             {
                                 mergedState.AddState(state);
@@ -265,7 +323,7 @@ namespace Raven.Server.ServerWide.Maintenance
                             }
                         }
 
-                        var cleanUp = mergedState.States.Min(s => CleanUpDatabaseValues(s.Value) ?? -1);
+                        var cleanUp = mergedState.States.Min(s => CleanUpDatabaseValues(context, s.Value) ?? -1);
                         if (cleanUp > 0)
                         {
                             cleanUpState ??= new Dictionary<string, long>();
@@ -284,7 +342,7 @@ namespace Raven.Server.ServerWide.Maintenance
                             switch (cleanupState)
                             {
                                 case CompareExchangeTombstonesCleanupState.InvalidDatabaseObservationState:
-                                    _hasMoreTombstones = true;
+                                    hasMoreTombstones = true;
                                     break;
                                 case CompareExchangeTombstonesCleanupState.HasMoreTombstones:
                                     Debug.Assert(cmd != null, $"Expected to get command {nameof(CleanCompareExchangeTombstonesCommand)} but it was null");
@@ -301,6 +359,8 @@ namespace Raven.Server.ServerWide.Maintenance
                     }
                 }
             }
+
+            _latestWriteUsageSnapshot = new WriteUsageSnapshot(writeUsageSnapshots);
 
             if (cleanupIndexes)
             {
@@ -319,11 +379,10 @@ namespace Raven.Server.ServerWide.Maintenance
                 {
                     var result = await _server.SendToLeaderAsync(cmd);
                     await _server.Cluster.WaitForIndexNotification(result.Index);
-                    var hasMore = (bool)result.Result;
-                    _hasMoreTombstones |= hasMore;
+                    hasMoreTombstones |= (bool)result.Result;
                 }
 
-                if (_hasMoreTombstones == false)
+                if (hasMoreTombstones == false)
                     _lastTombstonesCleanupTimeInTicks = now.Ticks;
             }
 
@@ -452,6 +511,23 @@ namespace Raven.Server.ServerWide.Maintenance
                     }
                 }
             }
+        }
+
+        private HashSet<string> GetQuillApplicationNames(Dictionary<string, ClusterNodeStatusReport> stats)
+        {
+            if (WriteUsageReporter.IsReportingEnabled(_server) == false)
+                return null;
+
+            var applications = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var nodeReport in stats.Values)
+            {
+                if (nodeReport.Report.TryGetValue(Client.Constants.Quill.ConfigDatabase, out var configReport) == false || configReport.QuillApplications == null)
+                    continue;
+
+                applications.UnionWith(configReport.QuillApplications);
+            }
+
+            return applications;
         }
 
         private bool SkipAnalyzingDatabaseGroup(DatabaseObservationState state, Leader currentLeader, DateTime now)
@@ -808,7 +884,7 @@ namespace Raven.Server.ServerWide.Maintenance
             return (bool)result.Result;
         }
 
-        private long? CleanUpDatabaseValues(DatabaseObservationState state)
+        private long? CleanUpDatabaseValues(ClusterOperationContext context, DatabaseObservationState state)
         {
             if (_server.Engine.CommandsVersionManager.CurrentClusterMinimalVersion <
                 ClusterCommandsVersionManager.ClusterCommandsVersions[nameof(CleanUpClusterStateCommand)])
@@ -831,10 +907,15 @@ namespace Raven.Server.ServerWide.Maintenance
                 commandCount = Math.Min(commandCount, report.LastCompletedClusterTransaction);
             }
 
-            if (commandCount <= state.ReadTruncatedClusterTransactionCommandsCount())
+            var truncatedCount = state.ReadTruncatedClusterTransactionCommandsCount();
+            if (commandCount <= truncatedCount)
                 return null;
 
-            return commandCount;
+            var firstCommandsCount = ClusterTransactionCommand.ReadFirstClusterTransactionPreviousCount(context, state.RawDatabase.DatabaseName);
+            if (firstCommandsCount == null || firstCommandsCount >= commandCount)
+                return null;
+
+            return Math.Min(commandCount, Math.Max(truncatedCount + _clusterTransactionsCleanupBatchSize, firstCommandsCount.Value + 1));
         }
 
         private static bool AllDatabaseNodesHasReport(DatabaseObservationState state)
@@ -875,7 +956,7 @@ namespace Raven.Server.ServerWide.Maintenance
 
         public void Dispose()
         {
-            _cts.Cancel();
+            _cts.SafeCancel(_observerLogger.Logger, $"{nameof(ClusterObserver)} on node {_nodeTag}");
 
             try
             {

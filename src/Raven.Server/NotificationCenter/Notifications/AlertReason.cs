@@ -1,10 +1,13 @@
 ﻿// ReSharper disable InconsistentNaming
+
 namespace Raven.Server.NotificationCenter.Notifications
 {
     public enum AlertReason
     {
         Etl_Error = 0,
         Etl_Warning = 1,
+        
+        // Backward compatibility
         Etl_TransformationError = 2,
         Etl_LoadError = 3,
         
@@ -107,6 +110,12 @@ namespace Raven.Server.NotificationCenter.Notifications
         
         SchemaValidationConfiguration_Error = 70,
 
-        GcThreadContention = 71
+        GcThreadContention = 71,
+        
+        Etl_HealthStatusChange = 72,
+
+        HighReadAheadKb = 73, // 72 is used in 7.2
+
+        CdcSink_Warning = 74
     }
 }

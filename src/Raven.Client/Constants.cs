@@ -65,6 +65,11 @@ namespace Raven.Client
             public const string RequestTime = "Request-Time";
 
             /// <summary>
+            /// HTTP header name identifying the originating client IP address through a proxy.
+            /// </summary>
+            public const string XForwardedFor = "X-Forwarded-For";
+
+            /// <summary>
             /// HTTP header name for server startup timestamp.
             /// </summary>
             public const string ServerStartupTime = "Server-Startup-Time";
@@ -339,6 +344,7 @@ namespace Raven.Client
             internal const string ServerAuthenticationOid = "1.3.6.1.5.5.7.3.1";
             internal const string ClientAuthenticationOid = "1.3.6.1.5.5.7.3.2";
             internal const string ServerCertExtensionOid =  CompanyInformation.CompanyOid + ".2.1";
+            internal const string SsoUserIdExtensionOid = CompanyInformation.CompanyOid + ".2.2";
         }
 
         internal sealed class Network
@@ -381,6 +387,15 @@ namespace Raven.Client
             /// Configuration identifier for studio settings.
             /// </summary>
             public const string StudioId = "Configuration/Studio";
+        }
+
+        internal sealed class Quill
+        {
+            public const string ConfigDatabase = "quill-config";
+
+            public const string AppIdPrefix = "apps/";
+
+            public const string ApplicationDatabasePropertyName = "Database";
         }
 
         /// <summary>
@@ -602,6 +617,8 @@ namespace Raven.Client
                 public const string AiAgentConversationCollection = "@conversations";
 
                 public const string AiAgentConversationHistoryCollection = "@conversations-history";
+
+                public const string AiAgentConversationDebugCollection = "@conversations-debug";
             }
 
             internal sealed class Ai
@@ -878,6 +895,9 @@ namespace Raven.Client
                 }
 
                 public const string ThrowRevisionKeyTooBigFix = "ThrowRevisionKeyTooBigFix";
+                public const string HashedRevisionPk = "HashedRevisionPk";
+                public const string PullReplicationCompositeChangeVectors = "PullReplicationCompositeChangeVectors";
+                public const string ThrowControlCharactersInIdentifier = "ThrowControlCharactersInIdentifier";
             }
         }
 

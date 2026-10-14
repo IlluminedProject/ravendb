@@ -306,14 +306,14 @@ namespace Raven.Server.Rachis
 
                 ContextPool = new ClusterContextPool(changes, _persistentState, configuration.Memory.MaxContextSizeToKeep);
                 TxMerger = new ClusterTransactionOperationsMerger(configuration, time, shutdown);
-                TxMerger.Initialize(ContextPool, IsEncrypted, PlatformDetails.Is32Bits || configuration.Storage.ForceUsing32BitsPager);
+                TxMerger.Initialize(ContextPool, IsEncrypted, PlatformDetails.Is32Bits || configuration.Storage.ForceUsing32BitsPager || env.Options.ForceUsing32BitsPager);
                 TxMerger.Start();
 
                 ClusterTopology topology;
                 using (ContextPool.AllocateOperationContext(out ClusterOperationContext context))
                 using (var tx = context.OpenWriteTransaction())
                 {
-                    _tag = ReadNodeTag(context);
+                    SetTag(ReadNodeTag(context));
 
                     RequestSnapshot = GetSnapshotRequest(context);
 
@@ -328,7 +328,7 @@ namespace Raven.Server.Rachis
                         if (topology.GetUrlFromTag(_tag) != myUrl)
                         {
                             topology.Members.Remove(_tag);
-                            topology.Members.Add(_tag, configuration.Core.GetNodeHttpServerUrl(myUrl));
+                            topology.Members.Add(_tag, configuration.Core.GetNodeClusterHttpServerUrl(myUrl));
                             SetTopology(this, context, topology);
                         }
                     }
@@ -2133,6 +2133,12 @@ namespace Raven.Server.Rachis
             return TxMerger.Enqueue(command);
         }
 
+        private void SetTag(string tag)
+        {
+            _tag = tag;
+            RvnLayoutRenderer.NodeTag = tag;
+        }
+
         public static void ValidateNodeTag(string nodeTag)
         {
             if (nodeTag == InitialTag)
@@ -2312,7 +2318,7 @@ namespace Raven.Server.Rachis
             {
                 if (tx is LowLevelTransaction llt && llt.Committed)
                 {
-                    _tag = newTag;
+                    SetTag(newTag);
                 }
             };
         }

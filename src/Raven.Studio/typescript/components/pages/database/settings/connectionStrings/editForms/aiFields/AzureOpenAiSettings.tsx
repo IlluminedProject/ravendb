@@ -13,16 +13,19 @@ import ConnectionTestResult from "components/common/connectionTests/ConnectionTe
 import { useServices } from "components/hooks/useServices";
 import { useAppSelector } from "components/store";
 import { databaseSelectors } from "components/common/shell/databaseSliceSelectors";
+import { connectionStringSelectors } from "components/pages/database/settings/connectionStrings/store/connectionStringsSlice";
 import PopoverWithHoverWrapper from "components/common/PopoverWithHoverWrapper";
 import EmbeddingsMaxConcurrentBatches from "./EmbeddingsMaxConcurrentBatchesField";
 import { useAsyncDebounce } from "components/hooks/useAsyncDebounce";
 import { SelectOption } from "components/common/select/Select";
 import TemperatureField from "./TemperatureField";
+import PromptCacheField from "./PromptCacheField";
 
 export default function AzureOpenAiSettings({ isUsedByAnyTask }: { isUsedByAnyTask: boolean }) {
     const { control, trigger } = useFormContext<ConnectionFormData<AiConnection>>();
     const { tasksService } = useServices();
     const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
+    const isServerWide = useAppSelector(connectionStringSelectors.isServerWide);
 
     const formValues = useWatch({ control });
 
@@ -32,16 +35,20 @@ export default function AzureOpenAiSettings({ isUsedByAnyTask }: { isUsedByAnyTa
             return;
         }
 
-        return tasksService.testAiConnectionString(databaseName, "AzureOpenAi", formValues.modelType, {
+        const settings = {
             ApiKey: formValues.azureOpenAiSettings.apiKey,
             Endpoint: formValues.azureOpenAiSettings.endpoint,
+            EnablePromptCache: formValues.azureOpenAiSettings.enablePromptCache,
             Model: formValues.azureOpenAiSettings.model,
             DeploymentName: formValues.azureOpenAiSettings.deploymentName,
             Dimensions: formValues.azureOpenAiSettings.dimensions,
             Temperature: formValues.azureOpenAiSettings.isSetTemperature
                 ? formValues.azureOpenAiSettings.temperature
                 : null,
-        });
+        };
+        return isServerWide
+            ? tasksService.testServerWideAiConnectionString("AzureOpenAi", formValues.modelType, settings)
+            : tasksService.testAiConnectionString(databaseName, "AzureOpenAi", formValues.modelType, settings);
     });
 
     const asyncGetModelOptions = useAsyncDebounce(
@@ -153,6 +160,7 @@ export default function AzureOpenAiSettings({ isUsedByAnyTask }: { isUsedByAnyTa
                     />
                 </div>
             )}
+            <PromptCacheField baseName="azureOpenAiSettings" serverDefaultValue={true} />
             <TemperatureField baseName="azureOpenAiSettings" />
             {formValues.modelType === "TextEmbeddings" && (
                 <EmbeddingsMaxConcurrentBatches baseName="azureOpenAiSettings" />

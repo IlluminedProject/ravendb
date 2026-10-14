@@ -60,9 +60,12 @@ class appUrl {
         editAmazonSqsEtl: (taskId?: number) => ko.pureComputed(() => appUrl.forEditAmazonSqsEtl(appUrl.currentDatabase(), taskId)),
         editKafkaSink: (taskId?: number) => ko.pureComputed(() => appUrl.forEditKafkaSink(appUrl.currentDatabase(), taskId)),
         editRabbitMqSink: (taskId?: number) => ko.pureComputed(() => appUrl.forEditRabbitMqSink(appUrl.currentDatabase(), taskId)),
+        editAzureServiceBusSink: (taskId?: number) => ko.pureComputed(() => appUrl.forEditAzureServiceBusSink(appUrl.currentDatabase(), taskId)),
+        editCdcSink: (taskId?: number) => ko.pureComputed(() => appUrl.forEditCdcSink(appUrl.currentDatabase(), taskId)),
         query: (indexName?: string) => ko.pureComputed(() => appUrl.forQuery(appUrl.currentDatabase(), indexName)),
         terms: (indexName?: string) => ko.pureComputed(() => appUrl.forTerms(indexName, appUrl.currentDatabase())),
-        addNewOngoingTask: (isAiOnly: boolean) => ko.pureComputed(() => appUrl.forAddNewOngoingTasks(appUrl.currentDatabase(), isAiOnly)),
+        addNewOngoingTaskUrl: (isAiOnly: boolean) => ko.pureComputed(() => appUrl.forAddNewOngoingTasks(appUrl.currentDatabase(), isAiOnly)),
+        importDataOptionsUrl: ko.pureComputed(() => appUrl.forImportDataOptions(appUrl.currentDatabase())),
         importDatabaseFromFileUrl: ko.pureComputed(() => appUrl.forImportDatabaseFromFile(appUrl.currentDatabase())),
         importCollectionFromCsv: ko.pureComputed(() => appUrl.forImportCollectionFromCsv(appUrl.currentDatabase())),
         importDatabaseFromSql: ko.pureComputed(() => appUrl.forImportFromSql(appUrl.currentDatabase())),
@@ -89,6 +92,8 @@ class appUrl {
         editAmazonSqsEtlTaskUrl: ko.pureComputed(() => appUrl.forEditAmazonSqsEtl(appUrl.currentDatabase())),
         editKafkaSinkTaskUrl: ko.pureComputed(() => appUrl.forEditKafkaSink(appUrl.currentDatabase())),
         editRabbitMqSinkTaskUrl: ko.pureComputed(() => appUrl.forEditRabbitMqSink(appUrl.currentDatabase())),
+        editAzureServiceBusSinkTaskUrl: ko.pureComputed(() => appUrl.forEditAzureServiceBusSink(appUrl.currentDatabase())),
+        editCdcSinkTaskUrl: ko.pureComputed(() => appUrl.forEditCdcSink(appUrl.currentDatabase())),
         csvImportUrl: ko.pureComputed(() => appUrl.forCsvImport(appUrl.currentDatabase())),
         status: ko.pureComputed(() => appUrl.forStatus(appUrl.currentDatabase())),
 
@@ -125,6 +130,7 @@ class appUrl {
         remoteAttachments: ko.pureComputed(() => appUrl.forRemoteAttachments(appUrl.currentDatabase())),
         documentSchema: ko.pureComputed(() => appUrl.forDocumentSchema(appUrl.currentDatabase())),
         documentSchemaPlayground: ko.pureComputed(() => appUrl.forDocumentSchemaPlayground(appUrl.currentDatabase())),
+        tasksError: ko.pureComputed(() => appUrl.forTasksErrors(appUrl.currentDatabase())),
 
         statusStorageReport: ko.pureComputed(() => appUrl.forStatusStorageReport(appUrl.currentDatabase())),
         statusBucketsReport: ko.pureComputed(() => appUrl.forStatusBucketsReport(appUrl.currentDatabase())),
@@ -140,6 +146,7 @@ class appUrl {
         chatAiAgent: (id: string) => ko.pureComputed(() => appUrl.forChatAiAgent(appUrl.currentDatabase(), id)),
         aiTasks: ko.pureComputed(() => appUrl.forAiTasks(appUrl.currentDatabase())),
         aiTasksStats: ko.pureComputed(() => appUrl.forAiTasksStats(appUrl.currentDatabase())),
+        aiTasksErrors: ko.pureComputed(() => appUrl.forAiTasksErrors(appUrl.currentDatabase())),
     };
 
     static checkIsAreaActive(routeRoot: string): boolean {
@@ -190,10 +197,14 @@ class appUrl {
         return "#admin/settings/trafficWatch" + filter;
     }
 
-    static forDebugInfo(): string {
-        return "#admin/settings/debugInfo";
+    static forDebugPackage(): string {
+        return "#admin/settings/debugPackage";
     }
-    
+
+    static forDebugPackageAnalyzer(): string {
+        return "#admin/settings/debugPackageAnalyzer";
+    }
+
     static forSystemStorageReport(): string {
         return "#admin/settings/storageReport"
     }
@@ -207,8 +218,12 @@ class appUrl {
         return "#admin/settings/runningQueries?" + databasePart;
     }
     
-    static forCaptureStackTraces(): string {
-        return "#admin/settings/captureStackTraces";
+    static forCaptureStackTraces(packageId?: string, nodeTag?: string): string {
+        const base = "#admin/settings/captureStackTraces";
+        if (packageId && nodeTag) {
+            return base + "?packageId=" + encodeURIComponent(packageId) + "&nodeTag=" + encodeURIComponent(nodeTag);
+        }
+        return base;
     }
 
     static forAdminJsConsole(): string {
@@ -234,7 +249,11 @@ class appUrl {
     static forServerWideTasks(): string {
         return "#admin/settings/serverWideTasks";
     }
-    
+
+    static forAddServerWideTask(): string {
+        return "#admin/settings/serverWideTasks/add";
+    }
+
     static forEditServerWideBackup(serverWideBackupTaskName? : string): string {
         const backupNamePart = serverWideBackupTaskName ? "?&taskName=" + encodeURIComponent(serverWideBackupTaskName) : "";
         return "#admin/settings/editServerWideBackup" + backupNamePart;
@@ -251,6 +270,12 @@ class appUrl {
 
     static forServerWideCustomSorters(): string {
         return "#admin/settings/serverWideCustomSorters";
+    }
+
+    static forServerWideConnectionStrings(type?: connectionStringsTypes.StudioConnectionType, name?: string): string {
+        const typeUrlPart = type ? "&type=" + encodeURIComponent(type) : "";
+        const nameUrlPart = name ? "&name=" + encodeURIComponent(name) : "";
+        return "#admin/settings/serverWideConnectionStrings?" + typeUrlPart + nameUrlPart;
     }
 
     static forDatabases(databasesUrlAction?: "compact" | "restore", databaseToCompact?: string, shardToCompact?: number): string {
@@ -280,7 +305,7 @@ class appUrl {
         return "#clusterDashboard";
     }
 
-    static forEditCmpXchg(key: string, db: database) {
+    static forEditCmpXchg(key: string, db: database | string) {
         const databaseUrlPart = appUrl.getEncodedDbPart(db);
         const keyUrlPart = key ? "&key=" + encodeURIComponent(key) : "";
         return "#databases/cmpXchg/edit?" + databaseUrlPart + keyUrlPart;
@@ -322,13 +347,13 @@ class appUrl {
         return databaseTag + "/edit?" + itemIdUrlPart + urlPart + pagedListInfo;
     }
 
-    static forNewCmpXchg(db: database) {
+    static forNewCmpXchg(db: database | string) {
         const baseUrlPart = "#databases/cmpXchg/edit?";
         const databasePart = appUrl.getEncodedDbPart(db);
         return baseUrlPart + databasePart;
     }
     
-    static forNewDoc(db: database, collection: string = null): string {
+    static forNewDoc(db: database | string, collection: string = null): string {
         const baseUrlPart = "#databases/edit?";
         const databasePart = appUrl.getEncodedDbPart(db);
         if (collection) {
@@ -347,8 +372,13 @@ class appUrl {
         return "#databases/status/ioStats?" + appUrl.getEncodedDbPart(db);
     }
 
-    static forIndexPerformance(db: database | string, indexName?: string): string {
-        return `#databases/indexes/performance?${(appUrl.getEncodedDbPart(db))}&${appUrl.getEncodedIndexNamePart(indexName)}`;
+    static forIndexPerformance(db: database | string, indexName?: string, packageId?: string, nodeTag?: string): string {
+        let url = `#databases/indexes/performance?${(appUrl.getEncodedDbPart(db))}&${appUrl.getEncodedIndexNamePart(indexName)}`;
+        // the package's indexing performance is captured per node, so opening it requires both ids (same as forCaptureStackTraces)
+        if (packageId && nodeTag) {
+            url += "&packageId=" + encodeURIComponent(packageId) + "&nodeTag=" + encodeURIComponent(nodeTag);
+        }
+        return url;
     }
     
     static forIndexCleanup(db: database | string): string {
@@ -397,7 +427,7 @@ class appUrl {
     }
 
     static forTombstonesState(db: database): string {
-        return "#databases/advanced/tombstonesState?" + appUrl.getEncodedDbPart(db);
+        return "#databases/status/tombstonesState?" + appUrl.getEncodedDbPart(db);
     }
 
     static forRevisions(db: database): string {
@@ -450,6 +480,31 @@ class appUrl {
     
     static forRevisionsBinCleaner(db: database | string): string {
         return "#databases/settings/revisionsBinCleaner?" + appUrl.getEncodedDbPart(db);
+    }
+    
+    static forTasksErrors(
+        db: database | string,
+        params: {
+            taskName?: string;
+            nodeTags?: string[];
+            shardNumbers?: string[];
+            healthStatuses?: string[];
+            taskTypes?: string[];
+            groupBy?: string;
+        } = {}
+    ): string {
+        const encodeArray = (key: string, values?: string[]) =>
+            values?.length ? "&" + key + "=" + encodeURIComponent(values.join(",")) : "";
+
+        const { taskName, nodeTags, shardNumbers, healthStatuses, taskTypes, groupBy } = params;
+        const databasePart = appUrl.getEncodedDbPart(db);
+        const taskNamePart = taskName ? "&taskName=" + encodeURIComponent(taskName) : "";
+        return "#databases/tasks/tasksErrors?" + databasePart + taskNamePart
+            + encodeArray("nodeTags", nodeTags)
+            + encodeArray("shardNumbers", shardNumbers)
+            + encodeArray("healthStatuses", healthStatuses)
+            + encodeArray("taskTypes", taskTypes)
+            + encodeArray("groupBy", groupBy ? [groupBy] : undefined);
     }
 
     static forRemoteAttachments(db: database): string {
@@ -573,6 +628,11 @@ class appUrl {
     static forTerms(indexName: string, db: database): string {
         const databasePart = appUrl.getEncodedDbPart(db);
         return "#databases/indexes/terms/" + encodeURIComponent(indexName) + "?" + databasePart;
+    }
+
+    static forImportDataOptions(db: database): string {
+        const databasePart = appUrl.getEncodedDbPart(db);
+        return "#databases/tasks/importOptions?" + databasePart;
     }
 
     static forImportDatabaseFromFile(db: database): string {
@@ -726,6 +786,18 @@ class appUrl {
         return "#databases/tasks/editRabbitMqSinkTask?" + databasePart + taskPart;
     }
 
+    static forEditAzureServiceBusSink(db: database | string, taskId?: number): string {
+        const databasePart = appUrl.getEncodedDbPart(db);
+        const taskPart = taskId ? "&taskId=" + taskId : "";
+        return "#databases/tasks/editAzureServiceBusSinkTask?" + databasePart + taskPart;
+    }
+
+    static forEditCdcSink(db: database | string, taskId?: number): string {
+        const databasePart = appUrl.getEncodedDbPart(db);
+        const taskPart = taskId ? "&taskId=" + taskId : "";
+        return "#databases/tasks/editCdcSinkTask?" + databasePart + taskPart;
+    }
+
     static forEditEmbeddingsGeneration(db: database | string, taskId?: number): string {
         const databasePart = appUrl.getEncodedDbPart(db);
 
@@ -736,12 +808,12 @@ class appUrl {
 
     static forEditGenAi(db: database | string, taskId?: number): string {
         const databasePart = appUrl.getEncodedDbPart(db);
-        
+
         const sourceViewPart = "&sourceView=" + appUrl.getAiTaskSourceView();
         const taskPart = taskId ? "&taskId=" + taskId : "";
         return "#databases/tasks/editGenAiTask?" + databasePart + sourceViewPart + taskPart;
     }
-    
+
     static getAiTaskSourceView(): EditAiTaskSourceView {
         if (window.location.href.includes("/ai/")) {
             return "AiTasks";
@@ -824,6 +896,11 @@ class appUrl {
     static forAiTasksStats(db: database | string): string {
         const databasePart = appUrl.getEncodedDbPart(db);
         return "#databases/ai/tasksStats?" + databasePart;
+    }
+
+    static forAiTasksErrors(db: database | string): string {
+        const databasePart = appUrl.getEncodedDbPart(db);
+        return "#databases/ai/tasksErrors?" + databasePart;
     }
 
     static getDatabaseNameFromUrl(): string {

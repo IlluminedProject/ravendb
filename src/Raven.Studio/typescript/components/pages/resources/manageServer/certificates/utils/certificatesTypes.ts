@@ -5,7 +5,9 @@ type DatabaseAccess = Raven.Client.ServerWide.Operations.Certificates.DatabaseAc
 
 export type CertificatesClearance = "Admin" | "Operator" | "User";
 
-export type CertificatesState = "Valid" | "About to expire" | "Expired";
+export type CertificatesState = "Valid" | "About to expire" | "Expired" | "Disabled";
+
+export type CertificatesManagementType = "SSO" | "Client" | "Server";
 
 export type CertificatesSortMode =
     | "By Name - Asc"
@@ -38,6 +40,10 @@ export interface UpdateCertificateDto {
     NotAfter?: string;
     Permissions: Record<string, DatabaseAccess>;
     TwoFactorAuthenticationKey: string;
+    Disabled?: boolean;
+    SsoServerPublicKeyPinningHashes?: string[];
+    AllowAnySsoServer?: boolean;
+    SsoIdentifiers?: SsoIdentifierDto[];
 }
 
 export interface UploadCertificateDto {
@@ -53,6 +59,34 @@ export interface UploadCertificateDto {
 export interface ReplaceServerCertificateDto {
     Certificate: string;
     Password: string;
+}
+
+export interface RegisterSsoServerCertDto {
+    Name: string;
+    Certificate: string;
+    Usage: "SsoServer";
+    SecurityClearance: "ValidUser";
+    Permissions: Record<string, DatabaseAccess>;
+}
+
+export type SsoProvider = Raven.Client.ServerWide.Operations.Certificates.SsoProvider;
+
+// Generated from the server's Raven.Client.ServerWide.Operations.Certificates.SsoIdentifier - kept as an alias
+// (rather than a hand-written mirror) so the shape stays in sync with the server type automatically.
+export type SsoIdentifierDto = Raven.Client.ServerWide.Operations.Certificates.SsoIdentifier;
+
+export interface RegisterSsoUserEntryDto {
+    Name: string;
+    Usage: "SsoClient";
+    SsoIdentifiers: SsoIdentifierDto[];
+    SsoServerPublicKeyPinningHashes: string[];
+    AllowAnySsoServer: boolean;
+    SecurityClearance: SecurityClearance;
+    Permissions: Record<string, DatabaseAccess>;
+}
+
+export interface FetchSsoServerCertResult {
+    Base64: string;
 }
 
 export type ExpireTimeUnit = Extract<unitOfTime.Base, "days" | "months">;

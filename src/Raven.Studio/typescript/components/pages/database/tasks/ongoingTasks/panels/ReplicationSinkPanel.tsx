@@ -1,7 +1,9 @@
-﻿import React from "react";
+import React from "react";
 import {
     BaseOngoingTaskPanelProps,
     ConnectionStringItem,
+    DestinationUrlItem,
+    formatReplicationMode,
     OngoingTaskActions,
     OngoingTaskName,
     OngoingTaskResponsibleNode,
@@ -26,36 +28,41 @@ import { useAppSelector } from "components/store";
 import { accessManagerSelectors } from "components/common/shell/accessManagerSliceSelectors";
 import { ExternalReplicationTaskDistribution } from "components/pages/database/tasks/ongoingTasks/partials/ExternalReplicationTaskDistribution";
 import { Icon } from "components/common/Icon";
+import { ReplicationCursorDetailItem } from "components/pages/database/tasks/ongoingTasks/partials/ReplicationCursorDetailItem";
 
 type ReplicationSinkPanelProps = BaseOngoingTaskPanelProps<OngoingTaskReplicationSinkInfo>;
 
 function Details(props: ReplicationSinkPanelProps & { canEdit: boolean }) {
     const { data, canEdit } = props;
     const connectionStringDefined = !!data.shared.destinationDatabase;
-    const { appUrl } = useAppUrls();
-
     const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
-    const connectionStringsUrl = appUrl.forConnectionStrings(databaseName, "Raven", data.shared.connectionStringName);
+
+    const mode = formatReplicationMode(data.shared.mode);
 
     return (
         <RichPanelDetails>
             <RichPanelDetailItem label="Hub Name">{data.shared.hubName}</RichPanelDetailItem>
+            {mode && <RichPanelDetailItem label="Mode">{mode}</RichPanelDetailItem>}
             <ConnectionStringItem
                 connectionStringDefined={connectionStringDefined}
                 canEdit={canEdit}
                 connectionStringName={data.shared.connectionStringName}
-                connectionStringsUrl={connectionStringsUrl}
+                connectionStringType="Raven"
+                databaseName={databaseName}
             />
             {data.shared.destinationDatabase && (
                 <RichPanelDetailItem label="Hub Database">{data.shared.destinationDatabase}</RichPanelDetailItem>
             )}
-            <RichPanelDetailItem label="Actual Hub URL">{data.shared.destinationUrl ?? "N/A"}</RichPanelDetailItem>
+            <DestinationUrlItem destinationUrl={data.shared.destinationUrl} label="Actual Hub URL" />
 
             {data.shared.topologyDiscoveryUrls.map((url) => (
                 <RichPanelDetailItem label="Topology Discovery URL" key={url}>
                     {url}
                 </RichPanelDetailItem>
             ))}
+
+            <ReplicationCursorDetailItem label="Hub Cursor" cursor={data.shared.hubCursor} />
+            <ReplicationCursorDetailItem label="Sink Cursor" cursor={data.shared.sinkCursor} />
         </RichPanelDetails>
     );
 }

@@ -26,7 +26,7 @@ public class GenAiConfiguration : AbstractAiIntegrationConfiguration
     public string Identifier { get; set; }
 
     /// <summary>
-    /// The source collection on which the GenAI ETL will operate.
+    /// The source collection on which the GenAI will operate.
     /// </summary>
     public string Collection { get; set; }
 
@@ -99,6 +99,9 @@ public class GenAiConfiguration : AbstractAiIntegrationConfiguration
     /// </summary>
     [JsonDeserializationIgnore]
     [JsonIgnore]
+#if NETCOREAPP3_1_OR_GREATER
+    [System.Text.Json.Serialization.JsonIgnore]
+#endif
     [Obsolete($"{nameof(GenAiConfiguration)} doesn't support multiple transformations. Please use {nameof(GenAiTransformation)} property instead.")]
 #pragma warning disable CS0809 // Obsolete member overrides non-obsolete member
     public override List<Transformation> Transforms

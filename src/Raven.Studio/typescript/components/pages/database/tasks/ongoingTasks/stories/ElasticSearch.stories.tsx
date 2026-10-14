@@ -51,7 +51,8 @@ export const Default: StoryObj<ElasticSearchProps> = {
         } else {
             tasksService.withGetTasks(mockedValue);
         }
-
+        tasksService.withTaskErrors([]);
+        tasksService.withEtlStats([]);
         mockEtlProgress(tasksService, args.completed, args.disabled, args.emptyScript);
 
         return <OngoingTasksPage />;

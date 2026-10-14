@@ -4,6 +4,7 @@ using System.Linq;
 using Raven.Client.Documents.Changes;
 using Raven.Client.Exceptions.Sharding;
 using Raven.Server.Documents.Replication.ReplicationItems;
+using Raven.Server.Json;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.Utils;
 using Sparrow.Binary;
@@ -343,8 +344,13 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
         foreach (var document in docs)
         {
             var docCv = context.GetChangeVector(document.ChangeVector);
-            if (ChangeVectorUtils.GetConflictStatus(docCv, upTo) != ConflictStatus.AlreadyMerged)
+            if (ChangeVectorUtils.GetConflictStatus(docCv, upTo, UnusedDatabaseIds) != ConflictStatus.AlreadyMerged)
             {
+                if (_logger.IsDebugEnabled)
+                    _logger.Debug($"Skipping cleanup of bucket '{bucket}': document '{document.Id}' is not covered by the migration change vector " +
+                                 $"(document CV: '{docCv}', upTo: '{upTo}', unused ids: [{(UnusedDatabaseIds == null ? string.Empty : string.Join(", ", UnusedDatabaseIds))}]). " +
+                                 "The bucket cannot be cleaned up until this document is covered by 'upTo'.");
+
                 result = ShardedDocumentDatabase.DeleteBucketCommand.DeleteBucketResult.Skipped;
                 break;
             }
@@ -352,6 +358,10 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
             // check change vectors of all document extensions
             if (HasDocumentExtensionWithGreaterChangeVector(context, document.Id, upTo))
             {
+                if (_logger.IsDebugEnabled)
+                    _logger.Debug($"Skipping deletion of document '{document.Id}' in bucket '{bucket}': it has a counter/time-series/attachment/revision " +
+                                 $"with a change vector greater than the migration change vector (upTo: '{upTo}'). The bucket cleanup will be marked as skipped.");
+
                 result = ShardedDocumentDatabase.DeleteBucketCommand.DeleteBucketResult.Skipped;
                 continue;
             }
@@ -377,6 +387,7 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
         long lastProcessedEtag = 0;
         bool hasMore = true, collectionNamesUpdated = false;
         var collectionNames = new Dictionary<string, CollectionName>(_collectionsCache, StringComparer.OrdinalIgnoreCase);
+        var holder = new Table.TableValueHolder(); // reused across iterations to avoid a per-row allocation
 
         while (hasMore)
         {
@@ -387,41 +398,78 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
                     continue;
 
                 var tombstoneChangeVector = context.GetChangeVector(tombstone.ChangeVector);
-                if (ChangeVectorUtils.GetConflictStatus(upTo, tombstoneChangeVector) != ConflictStatus.AlreadyMerged)
-                    break;
-
-                var collection = tombstone.Collection;
-                if (collectionNames.TryGetValue(collection, out var collectionName) == false)
+                if (ChangeVectorUtils.GetConflictStatus(tombstoneChangeVector, upTo, UnusedDatabaseIds) != ConflictStatus.AlreadyMerged)
                 {
-                    collectionNames[collection] = collectionName = new CollectionName(collection);
-                    collectionNamesUpdated = true;
+                    if (_logger.IsDebugEnabled)
+                        _logger.Debug($"Not marking tombstone '{tombstone.LowerId}' (type {tombstone.Type}, etag {tombstone.Etag}) in bucket '{bucket}' as artificial: " +
+                                     $"it is not covered by the migration change vector (tombstone CV: '{tombstoneChangeVector}', upTo: '{upTo}', " +
+                                     $"unused ids: [{(UnusedDatabaseIds == null ? string.Empty : string.Join(", ", UnusedDatabaseIds))}]). " +
+                                     "While this tombstone stays non-artificial it keeps the bucket eligible for re-migration.");
+
+                    lastProcessedEtag = tombstone.Etag;
+                    continue;
                 }
 
-                var writeTable = context.Transaction.InnerTransaction.OpenTable(TombstonesSchema, collectionName.GetTableName(CollectionTableType.Tombstones));
+                Table writeTable;
+                switch (tombstone.Type)
+                {
+                    case Tombstone.TombstoneType.Document:
+                        var collection = tombstone.Collection;
+                        if (collectionNames.TryGetValue(collection, out var collectionName) == false)
+                        {
+                            collectionNames[collection] = collectionName = new CollectionName(collection);
+                            collectionNamesUpdated = true;
+                        }
+
+                        writeTable = context.Transaction.InnerTransaction.OpenTable(TombstonesSchema, collectionName.GetTableName(CollectionTableType.Tombstones));
+                        break;
+
+                    case Tombstone.TombstoneType.Revision:
+                        writeTable = context.Transaction.InnerTransaction.OpenTable(TombstonesSchema, RevisionsTombstonesSlice);
+                        break;
+
+                    case Tombstone.TombstoneType.Attachment:
+                        writeTable = context.Transaction.InnerTransaction.OpenTable(TombstonesSchema, AttachmentsTombstonesSlice);
+                        break;
+
+                    default:
+                        System.Diagnostics.Debug.Assert(false, $"Unexpected tombstone type '{tombstone.Type}' in MarkTombstonesAsArtificial (bucket {bucket}, '{_documentDatabase.Name}').");
+
+                        lastProcessedEtag = tombstone.Etag;
+                        continue;
+                }
 
                 var newEtag = GenerateNextEtag();
                 var cv = ChangeVector.MergeWithDatabaseChangeVector(context, tombstoneChangeVector);
                 var flags = tombstone.Flags | DocumentFlags.Artificial | DocumentFlags.FromResharding;
 
+                writeTable.DirectRead(tombstone.StorageId, out holder.Reader);
+
+                using (TableValueReaderUtil.CloneTableValueReader(context, holder))
                 using (Slice.From(context.Allocator, cv, out var cvSlice))
-                using (Slice.External(context.Allocator, tombstone.LowerId, out var keySlice))
-                using (DocumentIdWorker.GetStringPreserveCase(context, collection, out Slice collectionSlice))
                 using (writeTable.Allocate(out TableValueBuilder tvb))
                 {
-                    var clonedKey = keySlice.Clone(context.Allocator);
-
-                    tvb.Add(clonedKey.Content.Ptr, clonedKey.Size);
-                    tvb.Add(Bits.SwapBytes(newEtag));
-                    tvb.Add(Bits.SwapBytes(tombstone.DeletedEtag));
-                    tvb.Add(tombstone.TransactionMarker);
-                    tvb.Add((byte)tombstone.Type);
-                    tvb.Add(collectionSlice);
-                    tvb.Add((int)flags);
-                    tvb.Add(cvSlice.Content.Ptr, cvSlice.Size);
-                    tvb.Add(tombstone.LastModified.Ticks);
+                    for (int i = 0; i < holder.Reader.Count; i++)
+                    {
+                        switch ((TombstoneTable)i)
+                        {
+                            case TombstoneTable.Etag:
+                                tvb.Add(Bits.SwapBytes(newEtag));
+                                break;
+                            case TombstoneTable.Flags:
+                                tvb.Add((int)flags);
+                                break;
+                            case TombstoneTable.ChangeVector:
+                                tvb.Add(cvSlice.Content.Ptr, cvSlice.Size);
+                                break;
+                            default:
+                                var ptr = holder.Reader.Read(i, out int size);
+                                tvb.Add(ptr, size);
+                                break;
+                        }
+                    }
 
                     writeTable.Update(tombstone.StorageId, tvb);
-                    context.Allocator.Release(ref clonedKey.Content);
                 }
 
                 // need to re open the read iterator after we modified the tree
@@ -453,7 +501,7 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
         foreach (var counter in counters)
         {
             var counterCv = context.GetChangeVector(counter.ChangeVector);
-            if (ChangeVectorUtils.GetConflictStatus(counterCv, upTo) == ConflictStatus.Update)
+            if (ChangeVectorUtils.GetConflictStatus(counterCv, upTo, UnusedDatabaseIds) == ConflictStatus.Update)
                 return true;
         }
 
@@ -463,18 +511,18 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
             foreach (var segment in segments)
             {
                 var tsCv = context.GetChangeVector(segment.ChangeVector);
-                if (ChangeVectorUtils.GetConflictStatus(tsCv, upTo) == ConflictStatus.Update)
+                if (ChangeVectorUtils.GetConflictStatus(tsCv, upTo, UnusedDatabaseIds) == ConflictStatus.Update)
                     return true;
             }
         }
 
-        using (DocumentIdWorker.GetLowerIdSliceAndStorageKey(context, documentId, out var lowerId, out _))
+        using (DocumentIdWorker.Compatibility.GetLowerIdSliceAndStorageKey(context, documentId, out var lowerId, out _))
         {
             var attachments = AttachmentsStorage.GetAttachmentDetailsForDocument(context, lowerId);
             foreach (var attachment in attachments)
             {
                 var attachmentCv = context.GetChangeVector(attachment.ChangeVector);
-                if (ChangeVectorUtils.GetConflictStatus(attachmentCv, upTo) == ConflictStatus.Update)
+                if (ChangeVectorUtils.GetConflictStatus(attachmentCv, upTo, UnusedDatabaseIds) == ConflictStatus.Update)
                     return true;
             }
         }
@@ -483,7 +531,7 @@ public sealed unsafe class ShardedDocumentsStorage : DocumentsStorage
         foreach (var revision in revisions)
         {
             var revisionCv = context.GetChangeVector(revision.ChangeVector);
-            if (ChangeVectorUtils.GetConflictStatus(revisionCv, upTo) == ConflictStatus.Update)
+            if (ChangeVectorUtils.GetConflictStatus(revisionCv, upTo, UnusedDatabaseIds) == ConflictStatus.Update)
                 return true;
         }
 

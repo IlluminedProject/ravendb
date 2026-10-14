@@ -44,6 +44,7 @@ namespace Raven.Server.Documents.Sharding
         public ShardExecutor ShardExecutor;
         public AllOrchestratorNodesExecutor AllOrchestratorNodesExecutor;
         public DatabaseRecord DatabaseRecord => _record;
+        public SupportedFeature SupportedFeature { get; private set; }
 
         public RavenConfiguration Configuration { get; internal set; }
 
@@ -51,7 +52,7 @@ namespace Raven.Server.Documents.Sharding
 
         public readonly RachisLogIndexNotifications RachisLogIndexNotifications;
 
-        public readonly ConcurrentSet<TcpConnectionOptions> RunningTcpConnections = new ConcurrentSet<TcpConnectionOptions>();
+        public readonly ConcurrentSet<TcpConnectionOptions> RunningTcpConnections = new();
 
         public readonly MetricCounters Metrics;
 
@@ -67,6 +68,7 @@ namespace Raven.Server.Documents.Sharding
 
             ServerStore = serverStore;
             _record = record;
+            SupportedFeature = new SupportedFeature(record);
 
             Loggers = new ShardedLoggersContext(this);
             _logger = Loggers.GetLogger<ShardedDatabaseContext>();
@@ -166,7 +168,7 @@ namespace Raven.Server.Documents.Sharding
                         {
                             _ = re.Value.UpdateTopologyAsync(
                                 new RequestExecutor.UpdateTopologyParameters(
-                                        new ServerNode() { ClusterTag = ServerStore.NodeTag, Database = ShardHelper.ToShardName(DatabaseName, shardNumber), Url = ServerStore.GetNodeHttpServerUrl() })
+                                        new ServerNode() { ClusterTag = ServerStore.NodeTag, Database = ShardHelper.ToShardName(DatabaseName, shardNumber), Url = ServerStore.GetNodeClusterHttpServerUrl() })
                                 { DebugTag = "shard-topology-update" });
                         }
                     }
@@ -185,6 +187,7 @@ namespace Raven.Server.Documents.Sharding
 
             SubscriptionsStorage.Update();
 
+            SupportedFeature = new SupportedFeature(record);
             Interlocked.Exchange(ref _record, record);
 
             return Task.CompletedTask;
@@ -270,11 +273,19 @@ namespace Raven.Server.Documents.Sharding
             if (_logger.IsInfoEnabled)
                 _logger.Info($"Disposing {nameof(ShardedDatabaseContext)} of {DatabaseName}.");
 
-            _databaseShutdown.Cancel();
+            _databaseShutdown.SafeCancel(_logger, $"{nameof(ShardedDatabaseContext)}: {DatabaseName}");
 
             var exceptionAggregator = new ExceptionAggregator(_logger, $"Could not dispose {nameof(ShardedDatabaseContext)} {DatabaseName}");
 
             exceptionAggregator.Execute(() => Replication?.Dispose());
+
+            foreach (var connection in RunningTcpConnections)
+            {
+                exceptionAggregator.Execute(() =>
+                {
+                    connection.Dispose();
+                });
+            }
 
             exceptionAggregator.Execute(() => ShardExecutor?.Dispose());
 

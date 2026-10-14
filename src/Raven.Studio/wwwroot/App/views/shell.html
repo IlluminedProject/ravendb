@@ -86,14 +86,46 @@
         <h3 data-bind="visible: $root.collectionsTracker.collections().length > 1, attr: { title: $root.collectionsCountText() + ' collections'}">
             Collections (<span data-bind="text: $root.collectionsCountText"></span>)
         </h3>
-        <li class="scroll collections-list">
+        <li class="collections-list">
             <ul>
-                <!-- ko foreach: $root.collectionsTracker.collections -->
+                <!-- ko if: $root.collectionsTracker.systemCollections().length > 0 -->
+                <li class="system-collections-group">
+                    <a class="system-group-header" data-bind="click: $root.collectionsTracker.toggleSystemCollections.bind($root.collectionsTracker),
+                                  css: { 'expanded': $root.collectionsTracker.systemCollectionsExpanded },
+                                  attr: { 'aria-expanded': $root.collectionsTracker.systemCollectionsExpanded }">
+                        <i class="icon-arrow-filled-right"></i>
+                        <span>@system</span>
+                        <div class="collection-count">
+                            <div class="value label label-default" data-bind="text: $root.collectionsTracker.systemCollectionsCountPrefix"></div>
+                            <div data-bind="attr: { class: $root.collectionsTracker.systemCollectionsSizeClass }"></div>
+                        </div>
+                    </a>
+                    <div class="system-collection-items-wrapper" data-bind="css: { 'expanded': $root.collectionsTracker.systemCollectionsExpanded }">
+                        <div class="system-collection-items-inner">
+                            <ul class="system-collection-items">
+                                <!-- ko foreach: $root.collectionsTracker.systemCollections -->
+                                <li>
+                                    <a data-bind="click: $parent.menu.navigate.bind($parent.menu), attr: { href: $root.urlForCollection($data), title: name },
+                                                  css: { 'active': $parent.item.isOpen($parent.menu.activeItem, $data) }">
+                                        <span data-bind="text: name"></span>
+                                        <div class="collection-count" data-bind="attr: {title: documentCount().toLocaleString()}, css: { 'bounce': hasBounceClass }">
+                                            <div class="value label label-default" data-bind="text: countPrefix"></div>
+                                            <div data-bind="attr: { class: sizeClass }"></div>
+                                        </div>
+                                    </a>
+                                </li>
+                                <!-- /ko -->
+                            </ul>
+                        </div>
+                    </div>
+                </li>
+                <!-- /ko -->
+                <!-- ko foreach: $root.collectionsTracker.userCollections -->
                 <li>
                     <a data-bind="click: $parent.menu.navigate.bind($parent.menu), attr: { href: $root.urlForCollection($data), title: name },
-                                  css: { 'active': $parent.item.isOpen($parent.menu.activeItem, $data) }, visible: !isAllDocuments">
+                                  css: { 'active': $parent.item.isOpen($parent.menu.activeItem, $data) }">
                         <span data-bind="text: name"></span>
-                        <div class="collection-count" data-bind="attr: {title: documentCount().toLocaleString()}, css: { 'bounce' : hasBounceClass }">
+                        <div class="collection-count" data-bind="attr: {title: documentCount().toLocaleString()}, css: { 'bounce': hasBounceClass }">
                             <div class="value label label-default" data-bind="text: countPrefix"></div>
                             <div data-bind="attr: { class: sizeClass }"></div>
                         </div>
@@ -205,6 +237,11 @@
             <span class="global-spinner spinner-sm"></span> <strong>Loading, please wait</strong>
         </div>
         <div class="footer-right">
+            <div class="footer-item" data-bind="visible: ssoAppUrl">
+                <a class="btn btn-primary btn-sm" data-bind="attr: { href: ssoAppUrl }" title="Back to SSO app">
+                    <i class="icon-arrow-left"></i> <span>Back to SSO app</span>
+                </a>
+            </div>
             <div class="footer-item bg-info" data-bind="visible: $root.clusterManager.votingInProgress">
                 <a data-bind="attr: { href: $root.urlForCluster() }" title="Voting in progress"><i class="icon-cluster-node"></i><span>Voting in progress</span></a>
             </div>

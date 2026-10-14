@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -21,6 +22,7 @@ using Sparrow.Server;
 using Tests.Infrastructure;
 using Tests.Infrastructure.Extensions;
 using Xunit;
+using Raven.Server.Documents.TasksErrors;
 
 namespace SlowTests.Server.Documents.AI.GenAi;
 
@@ -65,17 +67,19 @@ this.Comments[idx].IsSpam = $output.Blocked;
                 session.SaveChanges();
             }
 
-            EtlErrorInfo error = null;
+            IEnumerable<TaskItemErrorTableValue> errors = null;
             var value = await WaitForValueAsync(async () =>
             {
-                error = await Etl.TryGetTransformationErrorAsync(store.Database, config);
-                return error != null;
+                errors = await Etl.GetItemTransformationErrorsAsync(store.Database, config);
+                return errors.Any();
             }, true, timeout: 60_000);
 
             Assert.True(value);
-            Assert.NotNull(error);
-            Assert.True(error.Error.Contains("Invalid number of arguments for ai.genContext(ctx)"));
-            Assert.Equal(docId, error.DocumentId);
+            
+            var errorsList = errors.ToList();
+            Assert.NotEmpty(errorsList);
+            Assert.True(errorsList.First().Error.Contains("Invalid number of arguments for ai.genContext(ctx)"));
+            Assert.Equal(docId, errorsList.First().DocumentId);
         }
     }
 
@@ -122,15 +126,18 @@ if($output.Blocked)
                 session.SaveChanges();
             }
 
-            EtlErrorInfo error = null;
+            IEnumerable<TaskItemErrorTableValue> errors = null;
             var value = await WaitForValueAsync(async () =>
             {
-                error = await Etl.TryGetLoadErrorAsync(store.Database, config);
-                return error != null;
+                errors = await Etl.GetItemLoadErrorsAsync(store.Database, config);
+                return errors.Any();
             }, true, timeout: 60_000);
 
             Assert.True(value, await Etl.GetEtlDebugInfo(store.Database, TimeSpan.FromSeconds(60)));
-            Assert.NotNull(error);
+
+            Assert.NotEmpty(errors);
+
+            var error = errors.First();
             Assert.True(error.Error.Contains("Failed to apply update script"));
             Assert.True(error.Error.Contains("JavaScriptException: Property 'findIndexf' of object is not a function"));
             Assert.Equal(docId, error.DocumentId);
@@ -185,16 +192,19 @@ if($output.Blocked)
                 session.Store(post, docId);
                 session.SaveChanges();
             }
-
-            EtlErrorInfo error = null;
+            
+            IEnumerable<TaskItemErrorTableValue> errors = null;
             var value = await WaitForValueAsync(async () =>
             {
-                error = await Etl.TryGetLoadErrorAsync(store.Database, config);
-                return error != null;
+                errors = await Etl.GetItemLoadErrorsAsync(store.Database, config);
+                return errors.Any();
             }, true, timeout: 60_000);
 
             Assert.True(value);
-            Assert.NotNull(error);
+            
+            Assert.NotEmpty(errors);
+            
+            var error = errors.First();
 
             Assert.Contains("Failed to apply update script for context", error.Error);
             Assert.Contains("\"Text\":\"Free crypto airdrop! Sign up now at scamcoin.fake", error.Error);
@@ -264,15 +274,17 @@ this.Comments[idx].IsBlocked = $output.Blocked;";
 
             Assert.True(await etlDone.WaitAsync(TimeSpan.FromMinutes(1)));
 
-            EtlErrorInfo error = null;
+            IEnumerable<TaskItemErrorTableValue> errors = null;
             var value = await WaitForValueAsync(async () =>
             {
-                error = await Etl.TryGetLoadErrorAsync(store.Database, config);
-                return error != null;
+                errors = await Etl.GetItemLoadErrorsAsync(store.Database, config);
+                return errors.Any();
             }, true, timeout: 60_000);
 
             Assert.True(value);
-            Assert.NotNull(error);
+            Assert.NotEmpty(errors);
+
+            var error = errors.First();
 
             Assert.Contains("Model call failed", error.Error);
             Assert.Contains("win $$$$", error.Error);
@@ -348,14 +360,14 @@ this.Comments[idx].IsBlocked = $output.Blocked;";
             session.SaveChanges();
         }
 
-        EtlErrorInfo error = null;
+        IEnumerable<TaskItemErrorTableValue> errors = null;
         var gotError = await WaitForValueAsync(async () =>
         {
-            error = await Etl.TryGetLoadErrorAsync(store.Database, config);
-            return error != null;
+            errors = await Etl.GetItemLoadErrorsAsync(store.Database, config);
+            return errors.Any();
         }, true, timeout: 60_000);
-
-        Assert.True(gotError && error.Error.Contains("rate limit"), await AddDebugInfo(store, config));
+        
+        Assert.True(gotError && errors.First().Error.Contains("rate limit"));
 
         using (var session = store.OpenSession())
         {
@@ -411,7 +423,7 @@ this.Comments[idx].IsBlocked = $output.Blocked;";
     [RavenGenAiData(IntegrationType = RavenAiIntegration.vLLM, DatabaseMode = RavenDatabaseMode.Single)]
     public async Task GenAi_LoadError_AuthFailure_ShouldOnlyTrackSuccess(Options options, GenAiConfiguration config)
     {
-        using var store = GetDocumentStore();
+        using var store = GetDocumentStore(options);
 
         store.Maintenance.Send(new PutConnectionStringOperation<AiConnectionString>(config.Connection));
 
@@ -433,22 +445,19 @@ this.Comments[idx].IsSpam = $output.Blocked;";
         store.Maintenance.Send(new AddGenAiOperation(config));
         var db = await GetDatabase(store.Database);
 
-        var etlProcess = db.EtlLoader.Processes.FirstOrDefault() as GenAiTask;
-        Assert.NotNull(etlProcess);
+        GenAiTask etlProcess = null;
+        Assert.True(await WaitForValueAsync(() =>
+        {
+            etlProcess = db.EtlLoader.Processes.OfType<GenAiTask>().FirstOrDefault();
+            return Task.FromResult(etlProcess != null);
+        }, true, timeout: 15_000), "GenAi ETL process was not loaded in time");
 
         var chatCompletionClient = etlProcess.GetChatCompletionClient();
-        var enteredOnce = 0;
-        var blockEtlMre = new AsyncManualResetEvent();
 
         chatCompletionClient.ForTestingPurposesOnly().SimulateFailureAsync = ctx =>
         {
-            if (ctx.Contains("alex"))
-            {
-                if (Interlocked.CompareExchange(ref enteredOnce, 1, 0) == 0)
-                    throw new UnsuccessfulAiRequestException("Unauthorized", HttpStatusCode.Unauthorized) { RequestId = "fake-request-id" };
-
-                return blockEtlMre.WaitAsync(TimeSpan.FromSeconds(60));
-            }
+            if (ctx.Contains("alex") && ctx.Contains("AI Agent Parameters:") == false)
+                throw new UnsuccessfulAiRequestException("Unauthorized", HttpStatusCode.Unauthorized) { RequestId = "fake-request-id" };
 
             return Task.CompletedTask;
         };
@@ -466,28 +475,36 @@ this.Comments[idx].IsSpam = $output.Blocked;";
             session.SaveChanges();
         }
 
-        EtlErrorInfo error = null;
+        IEnumerable<TaskItemErrorTableValue> errors = null;
         var value = await WaitForValueAsync(async () =>
         {
-            error = await Etl.TryGetLoadErrorAsync(store.Database, config);
-            return error != null;
+            errors = await Etl.GetItemLoadErrorsAsync(store.Database, config);
+            return errors.Any();
         }, true, timeout: 60_000);
 
         Assert.True(value);
-        Assert.NotNull(error);
-        Assert.Contains("Unauthorized", error.Error);
+        Assert.NotEmpty(errors);
+        Assert.Contains("Unauthorized", errors.First().Error);
+
+        Assert.True(await WaitForValueAsync(async () =>
+        {
+            using var session = store.OpenAsyncSession();
+            var d = await session.LoadAsync<BlittableJsonReaderObject>(docId);
+            return d != null
+                   && d.TryGet(Constants.Documents.Metadata.Key, out BlittableJsonReaderObject m)
+                   && m.TryGet(Constants.Documents.Metadata.GenAiHashes, out BlittableJsonReaderObject h)
+                   && h.TryGet(config.Identifier, out BlittableJsonReaderArray arr) && arr.Length == 1;
+        }, true, timeout: 30_000), "only the successful context should be hashed");
 
         using (var session = store.OpenSession())
         {
             var doc = session.Load<BlittableJsonReaderObject>(docId);
             Assert.True(doc.TryGet(Constants.Documents.Metadata.Key, out BlittableJsonReaderObject metadata));
-            Assert.True(metadata.TryGet(Constants.Documents.Metadata.GenAiHashes, out BlittableJsonReaderObject hashesSection));
-            Assert.True(hashesSection.TryGet(config.Identifier, out BlittableJsonReaderArray hashes));
 
-            // Only one comment should have succeeded
-            Assert.Equal(1, hashes.Length);
+            // the failed context is parked via @refresh so only it will be retried later
+            Assert.True(metadata.TryGet(Constants.Documents.Metadata.Refresh, out object _));
 
-            // assert that the update phase was executed only for comment #2
+            // only the successful context (comment #2) was patched
             Assert.True(doc.TryGet(nameof(GenAiBasics.Post.Comments), out BlittableJsonReaderArray comments));
             Assert.Equal(2, comments.Length);
 
@@ -501,65 +518,12 @@ this.Comments[idx].IsSpam = $output.Blocked;";
             Assert.True(comment2.TryGet("IsSpam", out bool _));
         }
 
-        blockEtlMre.Set();
-
-        // assert that next ETL batch starts from 0 etag
-        var state = EtlProcess.GetProcessState(db, config.Name, config.Transforms[0].Name);
-        var lastProcessedEtag = state.GetLastProcessedEtag(db.DbBase64Id, Server.ServerStore.NodeTag);
-        Assert.Equal(0, lastProcessedEtag);
-
-        // assert that the comment with model failure is processed in the next ETL batch
-        var etlDone = Etl.WaitForEtlToComplete(store);
-
-        Assert.True(await etlDone.WaitAsync(TimeSpan.FromSeconds(60)));
-
-        using (var session = store.OpenSession())
+        // a partial failure commits the successful context and advances the checkpoint -
+        // we do not reprocess the whole batch from etag 0
+        Assert.True(await WaitForValueAsync(() =>
         {
-            var doc = session.Load<BlittableJsonReaderObject>(docId);
-            Assert.True(doc.TryGet(Constants.Documents.Metadata.Key, out BlittableJsonReaderObject metadata));
-            Assert.True(metadata.TryGet(Constants.Documents.Metadata.GenAiHashes, out BlittableJsonReaderObject hashesSection));
-            Assert.True(hashesSection.TryGet(config.Identifier, out BlittableJsonReaderArray hashes));
-
-            // now both contexts should have their hash in metadata
-            Assert.Equal(2, hashes.Length);
-
-            // assert that the update phase was executed for comment #2
-            Assert.True(doc.TryGet(nameof(GenAiBasics.Post.Comments), out BlittableJsonReaderArray comments));
-            Assert.Equal(2, comments.Length);
-
-            var comment1 = comments[0] as BlittableJsonReaderObject;
-            var comment2 = comments[1] as BlittableJsonReaderObject;
-
-            Assert.NotNull(comment1);
-            Assert.NotNull(comment2);
-
-            Assert.True(comment1.TryGet("IsSpam", out bool _));
-            Assert.True(comment1.TryGet("IsSpam", out bool _));
-        }
-
-        // assert that next ETL batch will NOT start from 0 etag
-        state = EtlProcess.GetProcessState(db, config.Name, config.Transforms[0].Name);
-        lastProcessedEtag = state.GetLastProcessedEtag(db.DbBase64Id, Server.ServerStore.NodeTag);
-        Assert.True(lastProcessedEtag > 0);
-    }
-
-    private async Task<string> AddDebugInfo(IDocumentStore store, GenAiConfiguration config)
-    {
-        var database = await GetDocumentDatabaseInstanceFor(store);
-        var perfStats = Etl.GetEtlPerformanceStatsForDatabase(database);
-
-        var sb = new StringBuilder();
-        sb.AppendLine("ETL performance stats:").AppendLine(perfStats);
-
-        var loadAlert = database.NotificationCenter.EtlNotifications.GetAlert<EtlErrorsDetails>(
-            GenAiTask.GenAiTaskTag, $"{config.Name}/{config.Transforms.First().Name}", AlertReason.Etl_LoadError);
-
-        if (loadAlert?.Details is EtlErrorsDetails details)
-        {
-            sb.AppendLine("Etl error details:")
-                .AppendLine(string.Join(',', details.Errors.Select(e => e.Error)));
-        }
-
-        return sb.ToString();
+            var state = EtlProcess.GetProcessState(db, config.Name, config.Transforms[0].Name);
+            return Task.FromResult(state.GetLastProcessedEtag(db.DbBase64Id, Server.ServerStore.NodeTag) > 0);
+        }, true, timeout: 30_000), "partial success should advance the ETL checkpoint");
     }
 }

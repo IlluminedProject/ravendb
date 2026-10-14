@@ -1,5 +1,4 @@
-﻿using System;
-using System.Buffers;
+using System;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Linq;
@@ -7,10 +6,12 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Raven.Client;
+using Raven.Client.Exceptions;
 using Raven.Server.Documents;
 using Raven.Server.Documents.Indexes;
 using Raven.Server.Documents.Queries;
 using Raven.Server.Documents.Queries.AST;
+using Raven.Server.Documents.Queries.Parser;
 using Raven.Server.Integrations.PostgreSQL.Messages;
 using Raven.Server.Integrations.PostgreSQL.Types;
 using Raven.Server.Logging;
@@ -28,10 +29,16 @@ namespace Raven.Server.Integrations.PostgreSQL
     {
         protected readonly DocumentDatabase DocumentDatabase;
         private QueryOperationContext _queryOperationContext;
-        private List<Document> _result;
+        private List<Document> _samples;
         private readonly int? _limit;
         private bool _queryWasRun;
         private static readonly RavenLogger Logger = RavenLogManager.Instance.GetLoggerForServer<RqlQuery>();
+
+        private const int SchemaInferenceSampleSize = 1024;
+
+        protected virtual bool IncludeDocumentIdColumn => true;
+
+        protected virtual bool IncludePowerBIJsonColumn => true;
 
         ~RqlQuery()
         {
@@ -52,18 +59,15 @@ namespace Raven.Server.Integrations.PostgreSQL
         public RqlQuery(string queryString, int[] parametersDataTypes, DocumentDatabase documentDatabase, int? limit = null) : base(queryString, parametersDataTypes)
         {
             DocumentDatabase = documentDatabase;
-
-            _result = null;
             _limit = limit;
         }
 
-        public override async Task<ICollection<PgColumn>> Init(bool allowMultipleStatements = false)
+        public override async Task<ICollection<PgColumn>> Init()
         {
             if (IsEmptyQuery)
                 return default;
 
-            _result = await RunRqlQuery();
-
+            _samples = await RunRqlQuery();
             return await GenerateSchema();
         }
 
@@ -75,54 +79,78 @@ namespace Raven.Server.Integrations.PostgreSQL
 
             var indexQuery = new IndexQueryServerSide(forcedQueryToRun ?? QueryString, queryParameters);
 
-            // If limit is 0, fetch one document for the schema generation
-            if (_limit != null)
+            // if limit is 0, fetch one document for schema generation; otherwise cap to the query limit
+            indexQuery.PageSize = _limit switch
             {
-                indexQuery.PageSize = _limit.Value == 0 ? 1 : _limit.Value;
-            }
+                0 => 1,
+                > 0 => Math.Min(_limit.Value, SchemaInferenceSampleSize),
+                _ => SchemaInferenceSampleSize
+            };
+
+            using var cancelToken = new OperationCancelToken(DocumentDatabase.DatabaseShutdown);
 
             _queryWasRun = true;
             var documentQueryResult =
-                await DocumentDatabase.QueryRunner.ExecuteQuery(indexQuery, _queryOperationContext, null, OperationCancelToken.None);
+                await DocumentDatabase.QueryRunner.ExecuteQuery(indexQuery, _queryOperationContext, null, cancelToken);
 
             return documentQueryResult.Results;
         }
 
+        // IndexQueryServerSide(string, ...) doesn't carry the parsed LIMIT/OFFSET into PageSize/Start
+        // (only the JSON-body Create() path does), so apply the embedded bounds here.
+        private void ApplyEmbeddedLimits(IndexQueryServerSide indexQuery)
+        {
+            if (indexQuery.Metadata.Query.Limit != null)
+            {
+                var limit = QueryBuilderHelper.GetLongValue(
+                    indexQuery.Metadata.Query, indexQuery.Metadata,
+                    indexQuery.QueryParameters, indexQuery.Metadata.Query.Limit, int.MaxValue);
+                indexQuery.Limit = limit;
+                indexQuery.PageSize = Math.Min(limit, indexQuery.PageSize);
+            }
+
+            if (indexQuery.Metadata.Query.Offset != null)
+            {
+                var offset = QueryBuilderHelper.GetLongValue(
+                    indexQuery.Metadata.Query, indexQuery.Metadata,
+                    indexQuery.QueryParameters, indexQuery.Metadata.Query.Offset, 0);
+                indexQuery.Offset = offset;
+                indexQuery.Start = Math.Max(offset, indexQuery.Start);
+            }
+        }
+
         protected virtual async Task<ICollection<PgColumn>> GenerateSchema()
         {
-            List<Document> samples;
-
-            if (_result == null || _result?.Count == 0)
+            if (_samples == null || _samples.Count == 0)
             {
                 var query = QueryMetadata.ParseQuery(QueryString, QueryType.Select);
 
                 query.Where = null;
+                // Schema discovery samples for type inference - it must not inherit the user's
+                // narrow LIMIT/OFFSET. Clearing them lets the sample scan walk up to the in-method
+                // cap instead of stopping early and inferring types from too small a window.
+                query.Limit = null;
+                query.Offset = null;
 
                 var queryWithoutFiltering = query.ToString();
 
-                var results = await RunRqlQuery(queryWithoutFiltering);
+                _samples = await RunRqlQuery(queryWithoutFiltering);
 
-                if (results == null || results.Count == 0)
+                if (_samples == null || _samples.Count == 0)
                     return Array.Empty<PgColumn>();
-
-                samples = results;
-            }
-            else
-            {
-                samples = _result;
             }
 
             var resultsFormat = GetDefaultResultsFormat();
 
-            if (samples[0].Id != null)
-                Columns[Constants.Documents.Indexing.Fields.DocumentIdFieldName] = new PgColumn(Constants.Documents.Indexing.Fields.DocumentIdFieldName, (short)Columns.Count, PgText.Default, resultsFormat);
+            if (IncludeDocumentIdColumn && _samples[0].Id != null)
+                Columns[PgSyntheticColumns.DocumentId] = new PgColumn(PgSyntheticColumns.DocumentId, (short)Columns.Count, PgText.Default, resultsFormat);
 
             BlittableJsonReaderObject.PropertyDetails prop = default;
 
             // If there's a null value in a particular column of the record, don't write null type to the schema.
             // Instead, iterate over results trying to find a record with the value filled in this column.
-            // Keep 'unchecked type' columns names in the list below. 
-            var uncheckedTypePropertiesNames = samples[0].Data.GetPropertyNames().ToList();
+            // Keep 'unchecked type' columns names in the list below.
+            var uncheckedTypePropertiesNames = _samples[0].Data.GetPropertyNames().ToList();
 
             // Skip metadata() column, so it will be added later to json() column
             uncheckedTypePropertiesNames.Remove(Constants.Documents.Metadata.Key);
@@ -130,12 +158,23 @@ namespace Raven.Server.Integrations.PostgreSQL
             // Fulfill the 'Columns' to prevent losing the order later.
             // Assign them null type (PgJson.Default) at the start.
             foreach (var property in uncheckedTypePropertiesNames.ToArray())
+            {
+                // RQL surfaces the document id as a property named `id()`; the synthetic `id` column was
+                // already prepended, so skip the duplicate (a column-count mismatch crashes PowerBI).
+                if (PgSyntheticColumns.IsDocumentIdColumn(property)
+                    && Columns.ContainsKey(PgSyntheticColumns.DocumentId))
+                {
+                    uncheckedTypePropertiesNames.Remove(property);
+                    continue;
+                }
+
                 Columns.TryAdd(property, new PgColumn(property, (short)Columns.Count, PgJson.Default, resultsFormat));
+            }
 
             // Go through results - we'll try to find all properties types.
-            for (int sampleIndex = 0; sampleIndex < samples.Count && sampleIndex < 1000; sampleIndex++)
+            for (int sampleIndex = 0; sampleIndex < _samples.Count; sampleIndex++)
             {
-                Document sample = samples[sampleIndex];
+                Document sample = _samples[sampleIndex];
 
                 // Iterate over the columns which type hasn't been figured out yet
                 var uncheckedTypePropertiesNamesCopy = uncheckedTypePropertiesNames.ToArray();
@@ -196,14 +235,16 @@ namespace Raven.Server.Integrations.PostgreSQL
                     break;
             }
 
-
-            if (Columns.TryGetValue(Constants.Documents.Querying.Fields.PowerBIJsonFieldName, out var jsonColumn))
+            if (IncludePowerBIJsonColumn)
             {
-                jsonColumn.PgType = PgJson.Default;
-            }
-            else
-            {
-                Columns[Constants.Documents.Querying.Fields.PowerBIJsonFieldName] = new PgColumn(Constants.Documents.Querying.Fields.PowerBIJsonFieldName, (short)Columns.Count, PgJson.Default, resultsFormat);
+                if (Columns.TryGetValue(PgSyntheticColumns.Json, out var jsonColumn))
+                {
+                    jsonColumn.PgType = PgJson.Default;
+                }
+                else
+                {
+                    Columns[PgSyntheticColumns.Json] = new PgColumn(PgSyntheticColumns.Json, (short)Columns.Count, PgJson.Default, resultsFormat);
+                }
             }
 
             return Columns.Values;
@@ -215,10 +256,13 @@ namespace Raven.Server.Integrations.PostgreSQL
             {
                 QueryMetadata.ParseQuery(queryText, QueryType.Select);
             }
-            catch
+            catch (Exception e) when (e is InvalidQueryException or QueryParser.ParseException)
             {
+                // Input is not valid RQL - leave it for the next dispatch arm (PowerBI / virtual catalog /
+                // SQL to RQL translator). Any other exception is a real failure and must propagate.
+                if (Logger.IsDebugEnabled)
+                    Logger.Debug($"{nameof(RqlQuery)}.{nameof(TryParse)} rejected query as non-RQL: {e.Message}");
                 rqlQuery = null;
-
                 return false;
             }
 
@@ -236,102 +280,132 @@ namespace Raven.Server.Integrations.PostgreSQL
                     return;
                 }
 
-                if (_result == null)
-                {
-                    if (IsNamedStatement)
-                        _result = await RunRqlQuery();
-                    else
-                        throw new InvalidOperationException("RqlQuery.Execute was called when _results = null");
-                }
-
-                if (_limit == 0 || _result == null || _result.Count == 0)
+                if (_limit == 0 || (_samples != null && _samples.Count == 0))
                 {
                     await writer.WriteAsync(builder.CommandComplete($"SELECT 0"), token);
                     return;
                 }
 
-                BlittableJsonReaderObject.PropertyDetails prop = default;
-                var row = ArrayPool<ReadOnlyMemory<byte>?>.Shared.Rent(Columns.Count);
+                // _samples == null means resources were released after a previous Execute (named statement re-execution) - proceed normally
 
-                try
-                {
-                    short? idIndex = null;
-                    if (Columns.TryGetValue(Constants.Documents.Indexing.Fields.DocumentIdFieldName, out var col))
-                    {
-                        idIndex = col.ColumnIndex;
-                    }
+                _queryOperationContext ??= QueryOperationContext.Allocate(DocumentDatabase);
 
-                    var jsonIndex = Columns[Constants.Documents.Querying.Fields.PowerBIJsonFieldName].ColumnIndex;
+                var parameters = DynamicJsonValue.Convert(Parameters);
+                var queryParameters = _queryOperationContext.Documents.ReadObject(parameters, "query/parameters");
+                var indexQuery = new IndexQueryServerSide(QueryString, queryParameters);
+                
+                ApplyEmbeddedLimits(indexQuery);
 
-                    foreach (var result in _result)
-                    {
-                        var jsonResult = result.Data;
+                if (_limit.HasValue)
+                    indexQuery.PageSize = Math.Min(indexQuery.PageSize, _limit.Value);
 
-                        Array.Clear(row, 0, row.Length);
+                await using var streamWriter = new PgStreamDocumentQueryResultWriter(
+                    writer, builder, this, Columns, GetDocumentIdColumnIndex(), GetPowerBIJsonColumnIndex(), _queryOperationContext.Documents);
 
-                        if (idIndex != null && result.Id != null)
-                        {
-                            row[idIndex.Value] = Encoding.UTF8.GetBytes(result.Id.ToString());
-                        }
+                using var cancelToken = new OperationCancelToken(DocumentDatabase.DatabaseShutdown, token);
+                await DocumentDatabase.QueryRunner.ExecuteStreamQuery(indexQuery, _queryOperationContext, NopHttpResponse.Instance, streamWriter, cancelToken);
 
-                        jsonResult.Modifications = new DynamicJsonValue(jsonResult);
-
-                        if (jsonResult.TryGet(Constants.Documents.Metadata.Key, out BlittableJsonReaderObject _))
-                        {
-                            // remove @metadata
-                            jsonResult.Modifications.Remove(Constants.Documents.Metadata.Key);
-                        }
-
-                        foreach (var (columnName, pgColumn) in Columns)
-                        {
-                            var index = jsonResult.GetPropertyIndex(columnName);
-                            if (index == -1)
-                                continue;
-
-                            jsonResult.GetPropertyByIndex(index, ref prop);
-
-                            var value = GetValueByType(prop, prop.Value, pgColumn);
-
-                            row[pgColumn.ColumnIndex] = value;
-
-                            HandleSpecialColumnsIfNeeded(columnName, prop, prop.Value, ref row);
-
-                            jsonResult.Modifications.Remove(columnName);
-                        }
-
-
-                        if (jsonResult.Modifications.Removals.Count != jsonResult.Count)
-                        {
-                            using (DocumentDatabase.DocumentsStorage.ContextPool.AllocateOperationContext(out DocumentsOperationContext context))
-                            using (context.OpenReadTransaction())
-                            {
-                                var modified = context.ReadObject(jsonResult, "renew");
-                                row[jsonIndex] = Encoding.UTF8.GetBytes(modified.ToString());
-                            }
-                        }
-
-                        await writer.WriteAsync(builder.DataRow(row[..Columns.Count]), token);
-                    }
-                }
-                finally
-                {
-                    ArrayPool<ReadOnlyMemory<byte>?>.Shared.Return(row);
-                }
-
-                await writer.WriteAsync(builder.CommandComplete($"SELECT {_result.Count}"), token);
+                await writer.WriteAsync(builder.CommandComplete($"SELECT {streamWriter.Count}"), token);
             }
             finally
             {
                 ReleaseQueryResources();
             }
-
         }
 
-        protected virtual void HandleSpecialColumnsIfNeeded(string columnName, BlittableJsonReaderObject.PropertyDetails property, object value, ref ReadOnlyMemory<byte>?[] row)
+        // Writes one streamed document into the rented row buffer via the per-row hooks. Called by
+        // PgStreamDocumentQueryResultWriter for each result; subclasses customize through the hooks
+        // (WriteDocumentIdColumn / BeforeRow / HandleSpecialColumnsIfNeeded / AfterRow) rather than
+        // by overriding the streaming mechanics.
+        internal void WriteRow(Document result, ReadOnlyMemory<byte>?[] row, short? idIndex, short? jsonIndex, DocumentsOperationContext context)
+        {
+            var jsonResult = result.Data;
+
+            WriteDocumentIdColumn(result, row, idIndex);
+
+            var modifications = BeforeRow(jsonResult, jsonIndex);
+
+            BlittableJsonReaderObject.PropertyDetails prop = default;
+            foreach (var (columnName, pgColumn) in Columns)
+            {
+                var index = jsonResult.GetPropertyIndex(columnName);
+                if (index == -1)
+                    continue;
+
+                jsonResult.GetPropertyByIndex(index, ref prop);
+
+                row[pgColumn.ColumnIndex] = GetValueByType(prop, prop.Value, pgColumn);
+
+                HandleSpecialColumnsIfNeeded(columnName, prop, prop.Value, row);
+
+                modifications?.Remove(columnName);
+            }
+
+            AfterRow(jsonResult, row, jsonIndex, context);
+        }
+
+        protected short? GetDocumentIdColumnIndex()
+        {
+            if (IncludeDocumentIdColumn == false)
+                return null;
+
+            return Columns.TryGetValue(PgSyntheticColumns.DocumentId, out var col)
+                ? col.ColumnIndex
+                : null;
+        }
+
+        protected short? GetPowerBIJsonColumnIndex()
+        {
+            if (IncludePowerBIJsonColumn == false)
+                return null;
+
+            return Columns.TryGetValue(PgSyntheticColumns.Json, out var jsonCol)
+                ? jsonCol.ColumnIndex
+                : null;
+        }
+
+        protected void WriteDocumentIdColumn(Document result, ReadOnlyMemory<byte>?[] row, short? idIndex)
+        {
+            if (idIndex != null && result.Id != null)
+                row[idIndex.Value] = Encoding.UTF8.GetBytes(result.Id.ToString());
+        }
+
+        protected virtual DynamicJsonValue BeforeRow(BlittableJsonReaderObject jsonResult, short? jsonIndex)
+        {
+            if (IncludePowerBIJsonColumn == false || jsonIndex == null)
+                return null;
+
+            jsonResult.Modifications = new DynamicJsonValue(jsonResult);
+
+            if (jsonResult.TryGet(Constants.Documents.Metadata.Key, out BlittableJsonReaderObject _))
+            {
+                // remove @metadata
+                jsonResult.Modifications.Remove(Constants.Documents.Metadata.Key);
+            }
+
+            return jsonResult.Modifications;
+        }
+
+        protected virtual void HandleSpecialColumnsIfNeeded(string columnName, BlittableJsonReaderObject.PropertyDetails property, object value, ReadOnlyMemory<byte>?[] row)
         {
         }
 
-        protected ReadOnlyMemory<byte>? GetValueByType(BlittableJsonReaderObject.PropertyDetails propertyDetails, object value, PgColumn pgColumn)
+        protected virtual void AfterRow(BlittableJsonReaderObject jsonResult, ReadOnlyMemory<byte>?[] row, short? jsonIndex, DocumentsOperationContext context)
+        {
+            if (IncludePowerBIJsonColumn == false || jsonIndex == null)
+                return;
+
+            if (jsonResult.Modifications == null)
+                return;
+
+            if (jsonResult.Modifications.Removals.Count == jsonResult.Count)
+                return;
+
+            using var modified = context.ReadObject(jsonResult, "renew");
+            row[jsonIndex.Value] = Encoding.UTF8.GetBytes(modified.ToString());
+        }
+
+        internal static ReadOnlyMemory<byte>? GetValueByType(BlittableJsonReaderObject.PropertyDetails propertyDetails, object value, PgColumn pgColumn)
         {
             switch (propertyDetails.Token & BlittableJsonReaderBase.TypesMask, pgColumn.PgType.Oid)
             {
@@ -346,6 +420,17 @@ namespace Raven.Server.Integrations.PostgreSQL
 
                 case (BlittableJsonToken.LazyNumber, PgTypeOIDs.Float8):
                     return pgColumn.PgType.ToBytes((double)(LazyNumberValue)value, pgColumn.FormatCode);
+
+                // Column PgType is fixed at schema-inference time, but RavenDB docs in one
+                // collection can mix numeric types (Integer + LazyNumber). Coerce instead of
+                // dropping the row.
+                case (BlittableJsonToken.Integer, PgTypeOIDs.Float8):
+                    // long -> double is lossless up to 2^53.
+                    return pgColumn.PgType.ToBytes((double)(long)value, pgColumn.FormatCode);
+
+                case (BlittableJsonToken.LazyNumber, PgTypeOIDs.Int8):
+                    // Lossy fractional narrowing - better than rendering blank.
+                    return pgColumn.PgType.ToBytes((long)(double)(LazyNumberValue)value, pgColumn.FormatCode);
 
                 case (BlittableJsonToken.CompressedString, PgTypeOIDs.Timestamp):
                 case (BlittableJsonToken.CompressedString, PgTypeOIDs.TimestampTz):
@@ -390,7 +475,15 @@ namespace Raven.Server.Integrations.PostgreSQL
                     }
 
                 case (BlittableJsonToken.String, PgTypeOIDs.Float8):
-                    return pgColumn.PgType.ToBytes(double.Parse((LazyStringValue)value), pgColumn.FormatCode);
+                    // Must pass CultureInfo.InvariantCulture explicitly - `.` is the JSON-native
+                    // decimal separator, but `double.Parse(string)` honors the current culture.
+                    // Without this, a server running under a locale with a comma decimal separator
+                    // (de-DE, pl-PL, fr-FR, etc.) throws FormatException mid-row write and corrupts
+                    // the wire protocol. The explicit `(string)` cast disambiguates LazyStringValue's
+                    // overloaded implicit conversion (it also has ReadOnlySpan<byte>).
+                    return pgColumn.PgType.ToBytes(
+                        double.Parse((string)(LazyStringValue)value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture),
+                        pgColumn.FormatCode);
 
                 case (BlittableJsonToken.Null, PgTypeOIDs.Json):
                     return Array.Empty<byte>();
@@ -403,7 +496,7 @@ namespace Raven.Server.Integrations.PostgreSQL
         {
             _queryOperationContext?.Dispose();
             _queryOperationContext = null;
-            _result = null;
+            _samples = null;
         }
 
         public override void Dispose()

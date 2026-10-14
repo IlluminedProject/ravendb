@@ -13,11 +13,13 @@ import {
 } from "components/pages/database/settings/connectionStrings/connectionStringsTypes";
 import { useAppSelector } from "components/store";
 import { useAsyncCallback } from "react-async-hook";
+import { connectionStringSelectors } from "components/pages/database/settings/connectionStrings/store/connectionStringsSlice";
 import { useFormContext, useWatch } from "react-hook-form";
 import PopoverWithHoverWrapper from "components/common/PopoverWithHoverWrapper";
 import RichAlert from "components/common/RichAlert";
 import EmbeddingsMaxConcurrentBatches from "./EmbeddingsMaxConcurrentBatchesField";
 import assertUnreachable from "components/utils/assertUnreachable";
+import PromptCacheField from "./PromptCacheField";
 
 type FormData = ConnectionFormData<AiConnection>;
 
@@ -25,6 +27,7 @@ export default function GoogleSettings({ isUsedByAnyTask }: { isUsedByAnyTask: b
     const { control, trigger } = useFormContext<FormData>();
     const { tasksService } = useServices();
     const databaseName = useAppSelector(databaseSelectors.activeDatabaseName);
+    const isServerWide = useAppSelector(connectionStringSelectors.isServerWide);
 
     const formValues = useWatch({ control });
 
@@ -34,12 +37,16 @@ export default function GoogleSettings({ isUsedByAnyTask }: { isUsedByAnyTask: b
             return;
         }
 
-        return tasksService.testAiConnectionString(databaseName, "Google", formValues.modelType, {
+        const settings = {
             AiVersion: formValues.googleSettings.aiVersion,
             ApiKey: formValues.googleSettings.apiKey,
+            EnablePromptCache: formValues.googleSettings.enablePromptCache,
             Model: formValues.googleSettings.model,
             Endpoint: formValues.googleSettings.endpoint,
-        });
+        };
+        return isServerWide
+            ? tasksService.testServerWideAiConnectionString("Google", formValues.modelType, settings)
+            : tasksService.testAiConnectionString(databaseName, "Google", formValues.modelType, settings);
     });
 
     return (
@@ -106,21 +113,24 @@ export default function GoogleSettings({ isUsedByAnyTask }: { isUsedByAnyTask: b
                     options={getModelOptions(formValues.modelType)}
                 />
             </div>
-            <div className="mb-2">
-                <FormLabel>
-                    Dimensions <OptionalLabel />
-                    <PopoverWithHoverWrapper message="The number of dimensions for the output embeddings.">
-                        <Icon icon="info" color="info" margin="ms-1" />
-                    </PopoverWithHoverWrapper>
-                </FormLabel>
-                <FormInput
-                    control={control}
-                    name="googleSettings.dimensions"
-                    type="number"
-                    disabled={isUsedByAnyTask}
-                />
-            </div>
-            <EmbeddingsMaxConcurrentBatches baseName="googleSettings" />
+            <PromptCacheField baseName="googleSettings" serverDefaultValue={false} />
+            {formValues.modelType === "TextEmbeddings" && (
+                <div className="mb-2">
+                    <FormLabel>
+                        Dimensions <OptionalLabel />
+                        <PopoverWithHoverWrapper message="The number of dimensions for the output embeddings.">
+                            <Icon icon="info" color="info" id="dimensions" margin="ms-1" />
+                        </PopoverWithHoverWrapper>
+                    </FormLabel>
+                    <FormInput
+                        control={control}
+                        name="googleSettings.dimensions"
+                        type="number"
+                        disabled={isUsedByAnyTask}
+                    />
+                </div>
+            )}
+            {formValues.modelType === "TextEmbeddings" && <EmbeddingsMaxConcurrentBatches baseName="googleSettings" />}
             <div className="d-flex mb-2">
                 <FlexGrow />
                 <ButtonWithSpinner

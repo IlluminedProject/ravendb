@@ -1,4 +1,5 @@
-﻿using System.Net.Http;
+using System.Net.Http;
+using System.Threading.Tasks;
 using Raven.Client.Http;
 using Raven.Client.Json.Serialization;
 using Sparrow.Json;
@@ -8,14 +9,16 @@ namespace Raven.Client.ServerWide.Commands
     public sealed class GetClusterTopologyCommand : RavenCommand<ClusterTopologyResponse>
     {
         private readonly string _debugTag;
+        private readonly bool _usePrivateUrls;
 
         public GetClusterTopologyCommand()
         {
         }
 
-        public GetClusterTopologyCommand(string debugTag)
+        public GetClusterTopologyCommand(string debugTag, bool usePrivateUrls = false)
         {
             _debugTag = debugTag;
+            _usePrivateUrls = usePrivateUrls;
         }
 
         public override HttpRequestMessage CreateRequest(JsonOperationContext ctx, ServerNode node, out string url)
@@ -23,6 +26,8 @@ namespace Raven.Client.ServerWide.Commands
             url = $"{node.Url}/cluster/topology";
             if (_debugTag != null)
                 url += "?" + _debugTag;
+            if (_usePrivateUrls)
+                url += (_debugTag != null ? "&" : "?") + "clientIndependent=true";
 
             return new HttpRequestMessage
             {
@@ -36,6 +41,21 @@ namespace Raven.Client.ServerWide.Commands
                 return;
 
             Result = JsonDeserializationClient.ClusterTopology(response);
+        }
+
+        public override async Task<ResponseDisposeHandling> ProcessResponse(JsonOperationContext context, HttpCache cache, HttpResponseMessage response, string url)
+        {
+            var result = await TopologyCommandHelper.ParseTopologyResponseAsync(context, response, url, "cluster/topology").ConfigureAwait(false);
+
+            if (cache != null && CanCache)
+                CacheResponse(cache, url, response, result);
+
+            SetResponse(context, result, fromCache: false);
+
+            if (Result?.Topology == null)
+                TopologyCommandHelper.ThrowUnexpectedTopologyResponse(url, result);
+
+            return ResponseDisposeHandling.Automatic;
         }
 
         public override bool IsReadRequest => true;

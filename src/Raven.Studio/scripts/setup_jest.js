@@ -1,3 +1,5 @@
+/* global jest, $ */
+
 const lodash = require("lodash");
 const knockout = require("knockout");
 require("knockout-postbox");
@@ -10,6 +12,11 @@ global.ko = knockout;
 global.$ = jquery;
 global.jQuery = jquery;
 
+const toMachineLocaleString = Number.prototype.toLocaleString;
+Number.prototype.toLocaleString = function (locales = "en-US", options) {
+    return toMachineLocaleString.call(this, locales, options);
+};
+
 require("bootstrap/dist/js/bootstrap");
 
 require("../typescript/test/mocks");
@@ -18,9 +25,34 @@ hooksForAutoMock.forEach(hook => {
     jest.mock("hooks/" + hook);
 });
 
+jest.mock("react-markdown", () => {
+    const React = require("react");
+
+    function ReactMarkdown({ children }) {
+        return React.createElement(React.Fragment, null, children);
+    }
+
+    return {
+        __esModule: true,
+        default: ReactMarkdown,
+        Markdown: ReactMarkdown,
+    };
+});
+
+jest.mock("remark-gfm", () => ({
+    __esModule: true,
+    default: () => undefined,
+}));
+
 jest.mock("../typescript/common/eventsCollector", () => ({
     default: new (require("../typescript/test/mocks/hooks/MockEventsCollector").default)()
 }));
+
+jest.mock("../typescript/common/notifications/notificationCenter", () => {
+    const notificationCenter = jest.requireActual("../typescript/common/notifications/notificationCenter");
+    notificationCenter.instance.monitorOperation = jest.fn(() => $.Deferred().promise());
+    return notificationCenter;
+});
 
 jest.mock("../typescript/common/bindingHelpers/aceEditorBindingHandler");
 
@@ -57,6 +89,7 @@ const mockJQueryPromise = () => $().promise();
 studioSettings.default.configureLoaders(mockJQueryPromise, mockJQueryPromise, mockJQueryPromise, mockJQueryPromise);
 
 Storage.prototype.getObject = jest.fn(() => null);
+Storage.prototype.setObject = jest.fn();
 
 global.define = function() {};
 
@@ -82,8 +115,30 @@ Object.defineProperty(HTMLElement.prototype, "scrollTo", {
     value: jest.fn(),
 });
 
+window.scrollTo = jest.fn();
+
+// jsdom implements neither of these
+Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: jest.fn(),
+});
+
 if (!window.ResizeObserver) {
   window.ResizeObserver = ROP.ResizeObserver;
+}
+
+if (!window.IntersectionObserver) {
+  window.IntersectionObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() {
+      return [];
+    }
+  };
 }
 
 window.HTMLElement.prototype.getBoundingClientRect = () => ({
@@ -95,6 +150,12 @@ window.HTMLElement.prototype.getBoundingClientRect = () => ({
     top: 0,
 });
 global.structuredClone = (val) => JSON.parse(JSON.stringify(val))
+
+if (!URL.createObjectURL) {
+    let objectUrlCounter = 0;
+    URL.createObjectURL = jest.fn(() => `blob:jest/${++objectUrlCounter}`);
+    URL.revokeObjectURL = jest.fn();
+}
 
 window.HTMLElement.prototype.getBoundingClientRect = () => ({
     width: 500,

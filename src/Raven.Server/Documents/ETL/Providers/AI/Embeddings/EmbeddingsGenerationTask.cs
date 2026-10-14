@@ -20,6 +20,7 @@ using Raven.Server.ServerWide.Context;
 using Sparrow.Server.Utils;
 
 #pragma warning disable SKEXP0001
+using Raven.Server.Documents.TasksErrors;
 
 namespace Raven.Server.Documents.ETL.Providers.AI.Embeddings;
 
@@ -131,45 +132,57 @@ public sealed class EmbeddingsGenerationTask : EtlProcess<EmbeddingsGenerationIt
         if (items is not EmbeddingsGenerationScriptRun embeddingsScriptRun)
         {
             Debug.Assert(items is EmbeddingGenerationScriptResult[] {Length: 0});
-            
+
             return 0;
         }
 
         var taskId = new EmbeddingsGenerationTaskIdentifier(Configuration.Identifier);
 
-        // Prevent database unloading during long-running AI operations
-        using (Database.PreventFromUnloadingByIdleOperations())
+        var failedStep = TaskErrorStep.ModelInference;
+        try
         {
-            var batch = Database.EmbeddingsGeneratorEtl.BatchFor(taskId);
-            using (var storageScope = scope.For(EmbeddingsGenerationOperations.GenerateInAiService))
+            // Prevent database unloading during long-running AI operations
+            using (Database.PreventFromUnloadingByIdleOperations())
+            using (EnterLoadStep(TaskErrorStep.ModelInference))
             {
-                foreach (var embeddingItem in embeddingsScriptRun.Additions)
+                var batch = Database.EmbeddingsGeneratorEtl.BatchFor(taskId);
+                using (var storageScope = scope.For(EmbeddingsGenerationOperations.GenerateInAiService))
                 {
-                    batch.StartGenerateEmbeddingFor(context, embeddingItem.DocumentId, embeddingItem.DocumentCollectionName,
-                        embeddingItem.Fields);
-                }
-                
-                // Wait for embeddings generation and storage of embeddings cache documents 
-                batch.WaitForGenerationAsync().GetAwaiter().GetResult();
-                storageScope.NumberOfEmbeddingsInCache = batch.CachedEmbeddings;
-                storageScope.NumberOfGeneratedEmbeddings = embeddingsScriptRun.Additions.Count;
-            }
+                    foreach (var embeddingItem in embeddingsScriptRun.Additions)
+                    {
+                        batch.StartGenerateEmbeddingFor(context, embeddingItem.DocumentId, embeddingItem.DocumentCollectionName,
+                            embeddingItem.Fields);
+                    }
 
-            foreach (var embeddingItem in embeddingsScriptRun.Removals)
-            {
-                batch.Delete(embeddingItem.DocumentId);
-            }
-            
-            using (var storageScope = scope.For(EmbeddingsGenerationOperations.Storage))
-            {
-                // Start storing embedding documents and wait for them to be stored
-                batch.StoreDocumentEmbeddingsAsync().GetAwaiter().GetResult();
-                
-                storageScope.NumberOfPutEmbeddingDocuments = embeddingsScriptRun.Additions.Count;
-                storageScope.NumberOfDeletedEmbeddingDocuments = embeddingsScriptRun.Removals.Count;
+                    // Wait for embeddings generation and storage of embeddings cache documents
+                    batch.WaitForGenerationAsync().GetAwaiter().GetResult();
+                    storageScope.NumberOfEmbeddingsInCache = batch.CachedEmbeddings;
+                    storageScope.NumberOfGeneratedEmbeddings = batch.GeneratedEmbeddings;
+                }
+
+                foreach (var embeddingItem in embeddingsScriptRun.Removals)
+                {
+                    batch.Delete(embeddingItem.DocumentId);
+                }
+
+                failedStep = TaskErrorStep.Persistence;
+                using (var storageScope = scope.For(EmbeddingsGenerationOperations.Storage))
+                using (EnterLoadStep(TaskErrorStep.Persistence))
+                {
+                    // Start storing embedding documents and wait for them to be stored
+                    batch.StoreDocumentEmbeddingsAsync().GetAwaiter().GetResult();
+
+                    storageScope.NumberOfPutEmbeddingDocuments = embeddingsScriptRun.Additions.Count;
+                    storageScope.NumberOfDeletedEmbeddingDocuments = embeddingsScriptRun.Removals.Count;
+                }
             }
         }
-        
+        catch
+        {
+            LoadErrorStep = failedStep;
+            throw;
+        }
+
         _fallbackCounter = 0;
         return embeddingsScriptRun.Additions.Count + embeddingsScriptRun.Removals.Count;
     }
@@ -188,13 +201,13 @@ public sealed class EmbeddingsGenerationTask : EtlProcess<EmbeddingsGenerationIt
 
     public EmbeddingsGenerationTestScriptResult RunTest(IEnumerable<EmbeddingGenerationScriptResult> records, DocumentsOperationContext context)
     {
-        (IEmbeddingGenerator<string, Embedding<float>> embeddingService, _) = AiHelper.CreateEmbeddingServicesForTest(
-            new EmbeddingsGenerationConfiguration { Connection = new AiConnectionString { EmbeddedSettings = new EmbeddedSettings() } });
+        (IEmbeddingGenerator<string, Embedding<float>> embeddingService, _) = AiHelper.CreateEmbeddingServicesForTest(Configuration);
 
         var result = new EmbeddingsGenerationTestScriptResult();
         List<string> chunks = [];
         List<EmbeddingsGenerationTestScriptResult.Item> allItems = [];
-        foreach (var record in records)
+        var additions = records is EmbeddingsGenerationScriptRun run ? run.Additions : [];
+        foreach (var record in additions)
         {
             foreach (var (name, values) in record.Fields)
             {
@@ -205,7 +218,7 @@ public sealed class EmbeddingsGenerationTask : EtlProcess<EmbeddingsGenerationIt
                     foreach(var chunked in TextChunker.Chunk(value, chunking))
                     {
                         var item = new EmbeddingsGenerationTestScriptResult.Item(chunked);
-                        chunks.Add(name);
+                        chunks.Add(chunked);
                         allItems.Add(item);
                         items.Add(item);
                     }
@@ -217,8 +230,10 @@ public sealed class EmbeddingsGenerationTask : EtlProcess<EmbeddingsGenerationIt
         {
             allItems[i].Embeddings = MemoryMarshalEx.Cast<float, byte>(results[i].Vector);
         }
+        
+        var itemErrors = Statistics.ReadInMemoryItemErrors();
 
-        result.TransformationErrors = Statistics.TransformationErrorsInCurrentBatch.Errors.ToList();
+        result.TransformationErrors = itemErrors.Where(x => x.Step == TaskErrorStep.Transformation).ToList();
         return result;
     }
 }

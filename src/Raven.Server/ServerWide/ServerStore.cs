@@ -39,16 +39,19 @@ using Raven.Client.ServerWide.Commands;
 using Raven.Client.ServerWide.Operations;
 using Raven.Client.ServerWide.Operations.Certificates;
 using Raven.Client.ServerWide.Operations.Configuration;
+using Raven.Client.ServerWide.Operations.ConnectionStrings;
 using Raven.Client.ServerWide.Operations.Integrations.PostgreSQL;
 using Raven.Client.ServerWide.Operations.OngoingTasks;
 using Raven.Client.ServerWide.Tcp;
 using Raven.Client.Util;
 using Raven.Server.Commercial;
+using Raven.Server.Commercial.WriteUsageMetering;
 using Raven.Server.Config;
 using Raven.Server.Config.Categories;
 using Raven.Server.Config.Settings;
 using Raven.Server.Dashboard;
 using Raven.Server.Documents;
+using Raven.Server.Documents.ETL;
 using Raven.Server.Documents.Indexes;
 using Raven.Server.Documents.Indexes.Analysis;
 using Raven.Server.Documents.Indexes.Sorting;
@@ -74,6 +77,7 @@ using Raven.Server.ServerWide.Commands.AI;
 using Raven.Server.ServerWide.Commands.ConnectionStrings;
 using Raven.Server.ServerWide.Commands.ETL;
 using Raven.Server.ServerWide.Commands.PeriodicBackup;
+using Raven.Server.ServerWide.Commands.CdcSink;
 using Raven.Server.ServerWide.Commands.QueueSink;
 using Raven.Server.ServerWide.Context;
 using Raven.Server.ServerWide.Maintenance;
@@ -176,6 +180,8 @@ namespace Raven.Server.ServerWide
 
         private readonly List<AlertRaised> _storeAlertForLateRaise;
 
+        private bool _dismissHighReadAheadAlert;
+
         public ServerStore(RavenConfiguration configuration, RavenServer server)
         {
             // we want our servers to be robust get early errors about such issues
@@ -206,7 +212,7 @@ namespace Raven.Server.ServerWide
             NotificationCenter = new ServerNotificationCenter(this, _notificationsStorage);
 
             ThreadsInfoNotifications = new ThreadsInfoNotifications(ServerShutdown);
-
+            
             _operationsStorage = new OperationsStorage();
 
             Operations = new ServerOperations(this, _operationsStorage);
@@ -279,7 +285,7 @@ namespace Raven.Server.ServerWide
             });
         }
 
-        private Lazy<ClusterRequestExecutor> CreateClusterRequestExecutor() => new(() => ClusterRequestExecutor.Create(new[] { GetNodeHttpServerUrl() }, Server.Certificate.ClientCertificate, Server.Conventions), LazyThreadSafetyMode.ExecutionAndPublication);
+        private Lazy<ClusterRequestExecutor> CreateClusterRequestExecutor() => new(() => ClusterRequestExecutor.Create(new[] { GetNodeClusterHttpServerUrl() }, Server.Certificate.ClientCertificate, Server.Conventions, usePrivateUrls: true), LazyThreadSafetyMode.ExecutionAndPublication);
 
         internal readonly FifoSemaphore ServerWideConcurrentlyRunningIndexesLock;
 
@@ -507,6 +513,7 @@ namespace Raven.Server.ServerWide
                     var term = _engine.CurrentTerm;
                     using (ClusterMaintenanceSupervisor = new ClusterMaintenanceSupervisor(this, _engine.Tag, term))
                     using (Observer = new ClusterObserver(this, ClusterMaintenanceSupervisor, _engine, term, _engine.ContextPool, ServerShutdown))
+                    using (new WriteUsageReporter(this, Observer, term, ServerShutdown))
                     {
                         var oldNodes = new Dictionary<string, string>();
                         while (_engine.LeaderTag == NodeTag && term == _engine.CurrentTerm)
@@ -570,7 +577,10 @@ namespace Raven.Server.ServerWide
                 clusterTopology ??= GetClusterTopology();
                 url = clusterTopology.GetUrlFromTag(NodeTag);
                 if (url != null)
+                {
+                    url = GetNodeHttpServerUrl();
                     return true;
+                }
             }
 
             url = null;
@@ -806,6 +816,40 @@ namespace Raven.Server.ServerWide
                     Logger.Info("An error occurred while trying to determine Is Swapping On Hdd Instead Of Ssd", e);
             }
 
+            try
+            {
+                var thresholdKb = Configuration.Storage.ReadAheadKbAlertThreshold;
+                if (thresholdKb != null)
+                {
+                    var highReadAheadDevices = PlatformSpecific.MemoryInformation.GetBlockDevicesWithHighReadAhead(thresholdKb.Value);
+                    if (highReadAheadDevices is { Count: > 0 })
+                    {
+                        var deviceList = string.Join(", ", highReadAheadDevices.Select(x => $"{x.DeviceName} ({x.ReadAheadValue})"));
+                        var alert = AlertRaised.Create(
+                            null,
+                            "High read_ahead_kb Detected",
+                            $"One or more block devices have read_ahead_kb set above {thresholdKb.Value} KB: {deviceList}. " +
+                            "This can cause excessive I/O during random-access workloads. " +
+                            "Check the device(s) backing RavenDB's data and consider lowering it there. Please follow the documentation for guidance.",
+                            AlertReason.HighReadAheadKb,
+                            NotificationSeverity.Warning);
+                        if (NotificationCenter.IsInitialized)
+                            NotificationCenter.Add(alert);
+                        else
+                            _storeAlertForLateRaise.Add(alert);
+                    }
+                    else if (highReadAheadDevices != null)
+                    {
+                        _dismissHighReadAheadAlert = true;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                if (Logger.IsInfoEnabled)
+                    Logger.Info("An error occurred while raising the high read_ahead_kb alert", e);
+            }
+
             options.SchemaVersion = SchemaUpgrader.CurrentVersion.ServerVersion;
             options.SchemaUpgrader = SchemaUpgrader.Upgrader(SchemaUpgrader.StorageType.Server, null, null, this);
             options.BeforeSchemaUpgrade = _server.BeforeSchemaUpgrade;
@@ -813,6 +857,7 @@ namespace Raven.Server.ServerWide
             options.ForceUsing32BitsPager = Configuration.Storage.ForceUsing32BitsPager;
             options.EnablePrefetching = Configuration.Storage.EnablePrefetching;
             options.DiscardVirtualMemory = Configuration.Storage.DiscardVirtualMemory;
+            options.UseSequentialReadAheadHintForJournalRecovery = Configuration.Storage.UseSequentialReadAheadHintForJournalRecovery;
 
             if (Configuration.Storage.MaxScratchBufferSize.HasValue)
                 options.MaxScratchBufferSize = Configuration.Storage.MaxScratchBufferSize.Value.GetValue(SizeUnit.Bytes);
@@ -878,7 +923,7 @@ namespace Raven.Server.ServerWide
             _engine = new RachisConsensus<ClusterStateMachine>(this);
             var clusterChanges = new ClusterChanges();
 
-            var myUrl = GetNodeHttpServerUrl();
+            var myUrl = GetNodeClusterHttpServerUrl();
             _engine.Initialize(_env, Configuration, clusterChanges, myUrl, Server.Time, out _lastClusterTopologyIndex, ServerShutdown);
 
             _notificationsStorage.Initialize(_env, ContextPool);
@@ -887,6 +932,9 @@ namespace Raven.Server.ServerWide
             {
                 NotificationCenter.Add(alertRaised);
             }
+
+            if (_dismissHighReadAheadAlert)
+                NotificationCenter.Dismiss(AlertRaised.GetKey(AlertReason.HighReadAheadKb, null), sendNotificationEvenIfDoesntExist: false);
 
             CheckSwapOrPageFileAndRaiseNotification();
             _storeAlertForLateRaise.Clear();
@@ -953,7 +1001,7 @@ namespace Raven.Server.ServerWide
                     }
 
                     publicUrl ??= GetNodeHttpServerUrl();
-                    privateUrl ??= Configuration.Core.ClusterServerUrl?.ToString() ?? publicUrl;
+                    privateUrl ??= GetNodeClusterHttpServerUrl();
 
                     var cmd = new UpdateServerPublishedUrlsCommand(NodeTag, publicUrl, privateUrl, Guid.NewGuid().ToString());
                     await SendToLeaderAsync(cmd);
@@ -1199,7 +1247,7 @@ namespace Raven.Server.ServerWide
 
                         if (_engine.CurrentState != RachisState.Follower)
                         {
-                            OnTopologyChangeInternal(clusterTopology, leaderClusterTopology: null, new ServerNode() { ClusterTag = NodeTag, Url = GetNodeHttpServerUrl() });
+                            OnTopologyChangeInternal(clusterTopology, leaderClusterTopology: null, new ServerNode() { ClusterTag = NodeTag, Url = GetNodeClusterHttpServerUrl() });
                             return;
                         }
 
@@ -1215,7 +1263,7 @@ namespace Raven.Server.ServerWide
                         using (var clusterRequestExecutor = CreateNewClusterRequestExecutor(leaderUrl))
                         using (ContextPool.AllocateOperationContext(out JsonOperationContext context))
                         {
-                            var command = new GetClusterTopologyCommand(NodeTag);
+                            var command = new GetClusterTopologyCommand(NodeTag, usePrivateUrls: true);
                             await clusterRequestExecutor.ExecuteAsync(command, context, token: ServerShutdown);
                             var response = command.Result;
 
@@ -1998,6 +2046,11 @@ namespace Raven.Server.ServerWide
 
             pullReplicationAsSink = JsonDeserializationClient.PullReplicationAsSink(pullReplicationBlittable);
 
+            if (pullReplicationAsSink.CertificateWithPrivateKey != null && pullReplicationAsSink.HasPrivateKey() == false)
+            {
+                throw new InvalidOperationException("Certificate with private key is required.");
+            }
+
             var replicationAsSinkCommand = new UpdatePullReplicationAsSinkCommand(dbName, raftRequestId)
             {
                 PullReplicationAsSink = pullReplicationAsSink,
@@ -2173,6 +2226,20 @@ namespace Raven.Server.ServerWide
         public Task<(long Index, object Result)> ToggleServerWideTaskStateAsync(ToggleServerWideTaskStateCommand.Parameters configuration, string raftRequestId)
         {
             var command = new ToggleServerWideTaskStateCommand(configuration, raftRequestId);
+
+            return SendToLeaderAsync(command);
+        }
+
+        public Task<(long Index, object Result)> PutServerWideConnectionStringAsync(ServerWideConnectionString connectionString, string raftRequestId)
+        {
+            var command = new PutServerWideConnectionStringCommand(connectionString, raftRequestId);
+
+            return SendToLeaderAsync(command);
+        }
+
+        public Task<(long Index, object Result)> RemoveServerWideConnectionStringAsync(RemoveServerWideConnectionStringCommand.DeleteConfiguration configuration, string raftRequestId)
+        {
+            var command = new RemoveServerWideConnectionStringCommand(configuration, raftRequestId);
 
             return SendToLeaderAsync(command);
         }
@@ -2568,6 +2635,73 @@ namespace Raven.Server.ServerWide
         public Task<(long, object)> RemoveQueueSinkProcessState(TransactionOperationContext context, string databaseName, string configurationName, string scriptName, string raftRequestId)
         {
             var command = new RemoveQueueSinkProcessStateCommand(databaseName, configurationName, scriptName, raftRequestId);
+
+            return SendToLeaderAsync(command);
+        }
+
+        public async Task<(long, object)> AddCdcSink(TransactionOperationContext context,
+            string databaseName, BlittableJsonReaderObject cdcSinkConfiguration, string raftRequestId)
+        {
+            var cdcSink = ValidateCdcSinkConfiguration(databaseName, cdcSinkConfiguration);
+            var command = new AddCdcSinkCommand(cdcSink, databaseName, raftRequestId);
+            return await SendToLeaderAsync(command);
+        }
+
+        public async Task<(long, object)> UpdateCdcSink(TransactionOperationContext context, string databaseName,
+            long id, BlittableJsonReaderObject cdcSinkConfiguration, string raftRequestId)
+        {
+            var cdcSink = ValidateCdcSinkConfiguration(databaseName, cdcSinkConfiguration);
+            var command = new UpdateCdcSinkCommand(id, cdcSink, databaseName, raftRequestId);
+            return await SendToLeaderAsync(command);
+        }
+
+        private Raven.Client.Documents.Operations.CdcSink.CdcSinkConfiguration ValidateCdcSinkConfiguration(string databaseName, BlittableJsonReaderObject cdcSinkConfiguration)
+        {
+            using (ContextPool.AllocateOperationContext(out TransactionOperationContext ctx))
+            using (ctx.OpenReadTransaction())
+            using (var rawRecord = Cluster.ReadRawDatabaseRecord(ctx, databaseName))
+            {
+                var cdcSink = JsonDeserializationCluster.CdcSinkConfiguration(cdcSinkConfiguration);
+                cdcSink.Validate(out var cdcSinkErr, validateName: false, validateConnection: false);
+
+                var sqlConnectionStrings = rawRecord.SqlConnectionStrings;
+                if (string.IsNullOrEmpty(cdcSink.ConnectionStringName))
+                    cdcSinkErr.Add($"'{nameof(cdcSink.ConnectionStringName)}' is required.");
+                else if (sqlConnectionStrings == null || sqlConnectionStrings.TryGetValue(cdcSink.ConnectionStringName, out _) == false)
+                    cdcSinkErr.Add($"Could not find connection string named '{cdcSink.ConnectionStringName}'. Please supply an existing connection string.");
+
+                ThrowInvalidCdcSinkConfigurationIfNecessary(cdcSinkConfiguration, cdcSinkErr);
+                return cdcSink;
+            }
+        }
+
+        private void ThrowInvalidCdcSinkConfigurationIfNecessary(BlittableJsonReaderObject cdcSinkConfiguration,
+            IReadOnlyCollection<string> errors)
+        {
+            if (errors.Count <= 0)
+                return;
+
+            var sb = new StringBuilder();
+            sb
+                .AppendLine("Invalid CDC Sink configuration.")
+                .AppendLine("Errors:");
+
+            foreach (var err in errors)
+            {
+                sb
+                    .Append("- ")
+                    .AppendLine(err);
+            }
+
+            sb.AppendLine("Configuration:");
+            sb.AppendLine(cdcSinkConfiguration.ToString());
+
+            throw new InvalidOperationException(sb.ToString());
+        }
+
+        public Task<(long, object)> RemoveCdcSinkProcessState(TransactionOperationContext context, string databaseName, string configurationName, string raftRequestId)
+        {
+            var command = new RemoveCdcSinkProcessStateCommand(databaseName, configurationName, raftRequestId);
 
             return SendToLeaderAsync(command);
         }
@@ -3305,7 +3439,7 @@ namespace Raven.Server.ServerWide
             if (_engine.CurrentState != RachisState.Passive)
                 return;
 
-            if (_engine.Bootstrap(publicServerUrl ?? _server.ServerStore.GetNodeHttpServerUrl(), nodeTag) == false)
+            if (_engine.Bootstrap(Configuration.Core.ClusterServerUrl.HasValue ? GetNodeClusterHttpServerUrl() : publicServerUrl ?? GetNodeClusterHttpServerUrl(), nodeTag) == false)
                 return;
 
             if (skipLicenseActivation == false)
@@ -3559,13 +3693,18 @@ namespace Raven.Server.ServerWide
             if (members == null || members.Count == 0)
                 throw new InvalidOperationException("Cannot wait for execution when there are no nodes to execute on.");
 
-            using (var requestExecutor = ClusterRequestExecutor.Create(GetClusterTopology().Members.Values.ToArray(), Server.Certificate.ClientCertificate, Server.Conventions))
+            // The local command execution was already checked above, without requiring a reachable cluster URL.
+            if (members.All(member => member == NodeTag))
+                return;
+
+            using (var requestExecutor = ClusterRequestExecutor.Create(GetClusterTopology().Members.Values.ToArray(), Server.Certificate.ClientCertificate, Server.Conventions, usePrivateUrls: true))
             using (var oct = new OperationCancelToken(cancelAfter: Configuration.Cluster.OperationTimeout.AsTimeSpan, token: ServerShutdown))
             {
                 List<Exception> exceptions = null;
 
                 var waitingTasks =
-                    members.Select(member => WaitForRaftIndexOnNodeAndReturnIfExceptionAsync(requestExecutor, member, index, context, oct.Token));
+                    members.Where(member => member != NodeTag)
+                        .Select(member => WaitForRaftIndexOnNodeAndReturnIfExceptionAsync(requestExecutor, member, index, context, oct.Token));
 
                 foreach (var exception in await Task.WhenAll(waitingTasks))
                 {
@@ -3706,6 +3845,11 @@ namespace Raven.Server.ServerWide
             );
         }
 
+        public string GetNodeClusterHttpServerUrl(string clientRequestedNodeUrl = null)
+        {
+            return Configuration.Core.GetNodeClusterHttpServerUrl(clientRequestedNodeUrl ?? _server.WebUrl);
+        }
+
         public string GetNodeTcpServerUrl(string clientRequestedNodeUrl = null)
         {
             var ravenServerWebUrl = clientRequestedNodeUrl ?? _server.WebUrl;
@@ -3719,7 +3863,12 @@ namespace Raven.Server.ServerWide
         {
             UriSetting[] urls = forExternalUse ? Configuration.Core.ExternalPublicTcpServerUrl : Configuration.Core.ClusterPublicTcpServerUrl;
             if (urls == null)
-                return new[] { GetNodeTcpServerUrl(clientRequestedNodeUrl) };
+            {
+                var defaultUrl = forExternalUse || Configuration.Core.ClusterServerUrl.HasValue == false
+                    ? GetNodeTcpServerUrl(clientRequestedNodeUrl)
+                    : Configuration.Core.GetNodeClusterTcpServerUrl(clientRequestedNodeUrl ?? _server.WebUrl, _server.GetTcpServerStatus().Port);
+                return new[] { defaultUrl };
+            }
             var length = urls.Length;
             var res = new string[length];
             for (var i = 0; i < length; i++)
@@ -3732,7 +3881,7 @@ namespace Raven.Server.ServerWide
 
         public async Task<NodeConnectionTestResult> TestConnectionFromRemote(RequestExecutor requestExecutor, JsonOperationContext context, string nodeUrl)
         {
-            var myUrl = GetNodeHttpServerUrl();
+            var myUrl = GetNodeClusterHttpServerUrl();
             NodeConnectionTestResult result;
 
             var nodeConnectionTest = new TestNodeConnectionCommand(myUrl);
@@ -3768,7 +3917,7 @@ namespace Raven.Server.ServerWide
 
                 using (var cts = new CancellationTokenSource(Server.Configuration.Cluster.OperationTimeout.AsTimeSpan))
                 {
-                    connectionInfo = ReplicationUtils.GetDatabaseTcpInfoAsync(GetNodeHttpServerUrl(), url, database, "Test-Connection", Server.Certificate.ClientCertificate,
+                    connectionInfo = ReplicationUtils.GetDatabaseTcpInfoAsync(GetNodeClusterHttpServerUrl(), url, database, "Test-Connection", Server.Certificate.ClientCertificate,
                         cts.Token);
                 }
 
@@ -3818,7 +3967,8 @@ namespace Raven.Server.ServerWide
 
         public DynamicJsonValue GetTcpInfoAndCertificates(string clientRequestedNodeUrl, bool forExternalUse = false)
         {
-            var tcpServerUrl = GetNodeTcpServerUrl(clientRequestedNodeUrl);
+            var urls = GetNodeClusterTcpServerUrls(clientRequestedNodeUrl, forExternalUse);
+            var tcpServerUrl = forExternalUse || urls.Length == 0 ? GetNodeTcpServerUrl(clientRequestedNodeUrl) : urls[0];
             if (tcpServerUrl.StartsWith("tcp://localhost.fiddler:", StringComparison.OrdinalIgnoreCase))
                 tcpServerUrl = tcpServerUrl.Remove(15, 8);
 
@@ -3830,7 +3980,6 @@ namespace Raven.Server.ServerWide
                 [nameof(TcpConnectionInfo.ServerId)] = ServerId.ToString()
             };
 
-            var urls = GetNodeClusterTcpServerUrls(clientRequestedNodeUrl, forExternalUse);
             var array = new DynamicJsonArray();
             foreach (var url in urls)
             {
@@ -3886,7 +4035,7 @@ namespace Raven.Server.ServerWide
                     };
                     var journalIoStatsResult = Server.DiskStatsGetter.Get(driveInfo?.JournalPath.DriveName);
                     if (journalIoStatsResult != null)
-                        usage.IoStatsResult = FillIoStatsResult(ioStatsResult);
+                        journalUsage.IoStatsResult = FillIoStatsResult(journalIoStatsResult);
 
                     yield return journalUsage;
                 }
@@ -3912,7 +4061,7 @@ namespace Raven.Server.ServerWide
                         };
                         var tempBufferIoStatsResult = Server.DiskStatsGetter.Get(driveInfo?.TempPath.DriveName);
                         if (tempBufferIoStatsResult != null)
-                            tempBuffersUsage.IoStatsResult = FillIoStatsResult(ioStatsResult);
+                            tempBuffersUsage.IoStatsResult = FillIoStatsResult(tempBufferIoStatsResult);
 
                         yield return tempBuffersUsage;
                     }
@@ -3974,6 +4123,9 @@ namespace Raven.Server.ServerWide
             internal Action<string, List<ClusterTransactionCommand.SingleClusterDatabaseCommand>> BeforeExecuteClusterTransactionBatch;
             internal Action<ClusterObserver.CompareExchangeTombstonesCleanupState> AfterCompareExchangeTombstonesResult;
             internal bool IgnoreClusterTransactionIndexInCompareExchangeCleaner;
+            internal Action<DynamicJsonValue> OnWriteUsageReportReady;   // capture the genuine assembled body
+            internal bool SkipWriteUsageActualSend;                      // suppress the real POST to api.ravendb.net
+            internal bool ForceWriteUsageReportingEnabled;               // bypass the Quill-license gate in tests
         }
 
 #if DEBUG

@@ -4,6 +4,7 @@ import { LoadError } from "components/common/LoadError";
 import VirtualTable from "components/common/virtualTable/VirtualTable";
 import { AsyncStateStatus } from "react-async-hook";
 import { useMemo } from "react";
+import { virtualTableConstants } from "components/common/virtualTable/utils/virtualTableConstants";
 
 interface IndexErrorsPanelTableProps {
     status: AsyncStateStatus;
@@ -12,6 +13,9 @@ interface IndexErrorsPanelTableProps {
     width: number;
     isLoading: boolean;
     table: Table<IndexErrorPerDocument>;
+    // when reused for a debug-package snapshot the edit-index / view-document hyperlinks point at the
+    // live server and are meaningless, so callers can render plain values instead
+    disableLinks?: boolean;
 }
 
 export function IndexErrorsPanelTable({
@@ -21,6 +25,7 @@ export function IndexErrorsPanelTable({
     indexErrors,
     width,
     table,
+    disableLinks,
 }: IndexErrorsPanelTableProps) {
     const { indexErrorsPanelColumns } = useIndexErrorsPanelColumns(width);
 
@@ -30,6 +35,7 @@ export function IndexErrorsPanelTable({
         ...table.options,
         data,
         columns: indexErrorsPanelColumns,
+        meta: { ...table.options.meta, disableLinks },
     });
 
     return (
@@ -37,7 +43,12 @@ export function IndexErrorsPanelTable({
             {status === "error" ? (
                 <LoadError error="Error during loading identities" refresh={refresh} />
             ) : (
-                <VirtualTable heightInPx={400} table={indexErrorsPanelTable} isLoading={isLoading} />
+                <VirtualTable
+                    heightInPx={400}
+                    rowHeightInPx={virtualTableConstants.doubleLineRowHeightInPx}
+                    table={indexErrorsPanelTable}
+                    isLoading={isLoading}
+                />
             )}
         </>
     );

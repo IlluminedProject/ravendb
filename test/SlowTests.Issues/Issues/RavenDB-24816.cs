@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Exceptions;
@@ -16,7 +17,7 @@ public class RavenDB_24816 : EmbeddingsGenerationTestBase
     {
     }
     
-    [RavenMultiplatformFact(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+    [RavenFact(RavenTestCategory.Ai)]
     public void OverlapTokensSettingShouldWork()
     {
         const string plainTextToChunk = "this is a relatively long text that should produce multiple chunks because of the chunking configuration (max tokens per chunk)";
@@ -44,7 +45,7 @@ public class RavenDB_24816 : EmbeddingsGenerationTestBase
         Assert.Equal(expectedChunks, chunks);
     }
     
-    [RavenMultiplatformFact(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+    [RavenFact(RavenTestCategory.Ai)]
     public void OverlapTokensSettingForMarkdownShouldWork()
     {
         const string markdownToChunk = """
@@ -79,7 +80,7 @@ public class RavenDB_24816 : EmbeddingsGenerationTestBase
         Assert.Equal(expectedChunks, chunks);
     }
     
-    [RavenMultiplatformFact(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+    [RavenFact(RavenTestCategory.Ai)]
     public async Task OverlapTokensSettingInScriptShouldWork()
     {
         const string plainTextToChunk =
@@ -119,7 +120,7 @@ public class RavenDB_24816 : EmbeddingsGenerationTestBase
         }
     }
     
-    [RavenMultiplatformFact(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+    [RavenFact(RavenTestCategory.Ai)]
     public async Task OverlapTokensSettingViaPathShouldWork()
     {
         const string plainTextToChunk =
@@ -201,7 +202,7 @@ public class RavenDB_24816 : EmbeddingsGenerationTestBase
         }
     }
     
-    [RavenMultiplatformFact(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+    [RavenFact(RavenTestCategory.Ai)]
     public async Task UnsupportedChunkingSettingsInScriptThrowRelevantException()
     {
         const string plainTextToChunk =
@@ -224,13 +225,13 @@ public class RavenDB_24816 : EmbeddingsGenerationTestBase
 
             await aiTaskDone.WaitAsync(TimeSpan.FromSeconds(5));
 
-            var transformationError = Etl.TryGetTransformationErrorAsync(store.Database, configuration).GetAwaiter().GetResult();
+            var transformationErrors = Etl.GetItemTransformationErrorsAsync(store.Database, configuration).GetAwaiter().GetResult();
 
-            Assert.Contains("text.splitLines(text | [text], maxTokensPerLine) has to be called with 2 arguments", transformationError.Error);
+            Assert.Contains("text.splitLines(text | [text], maxTokensPerLine) has to be called with 2 arguments", transformationErrors.First().Error);
         }
     }
     
-    [RavenMultiplatformFact(RavenTestCategory.Ai, RavenArchitecture.AllX64)]
+    [RavenFact(RavenTestCategory.Ai)]
     public async Task OverlapTokensShouldBeBackwardCompatible()
     {
         const string plainTextToChunk =

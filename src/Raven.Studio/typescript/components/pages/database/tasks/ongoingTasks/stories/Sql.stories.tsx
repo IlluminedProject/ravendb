@@ -51,7 +51,8 @@ export const Default: StoryObj<SqlProps> = {
         } else {
             tasksService.withGetTasks(mockedValue);
         }
-
+        tasksService.withTaskErrors([]);
+        tasksService.withEtlStats([]);
         mockEtlProgress(tasksService, args.completed, args.disabled, args.emptyScript);
 
         return <OngoingTasksPage />;

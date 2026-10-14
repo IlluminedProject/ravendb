@@ -457,13 +457,15 @@ namespace Voron.Data.BTrees
             byte* dataPos;
             if (page.HasSpaceFor(_llt, key, len) == false)
             {
-                if (IsLeafCompressionSupported == false || TryCompressPageNodes(key, len, page) == false)
+                DecompressedLeafPage decompressedPageToSplit = null;
+
+                if (IsLeafCompressionSupported == false || TryCompressPageNodes(key, len, page, out decompressedPageToSplit) == false)
                 {
                     using (var cursor = cursorConstructor.Build(key))
                     {
                         cursor.Update(cursor.Pages, page);
 
-                        var pageSplitter = new TreePageSplitter(_llt, this, key, len, pageNumber, nodeType, cursor);
+                        var pageSplitter = new TreePageSplitter(_llt, this, key, len, pageNumber, nodeType, cursor, pageDecompressed: decompressedPageToSplit);
                         dataPos = pageSplitter.Execute();
                     }
 
@@ -1365,9 +1367,14 @@ namespace Voron.Data.BTrees
                         if (State.Header.RootObjectType == RootObjectType.Table) // tables might have mixed values, fixed size trees inside have dedicated handling
                             continue;
                         
-                        if ((State.Header.Flags & TreeFlags.FixedSizeTrees) == TreeFlags.FixedSizeTrees)
+                        if ((State.Header.Flags & TreeFlags.FixedSizeTrees) == TreeFlags.FixedSizeTrees ||
+                            (State.Header.Flags & TreeFlags.Streams) == TreeFlags.Streams)
                         {
                             var valueReader = GetValueReaderFromHeader(node);
+
+                            // Check if this is an inline stream - no extra pages to collect
+                            if (valueReader.Length >= 1 && ((RootObjectType*)valueReader.Base)[0] == RootObjectType.InlineStream)
+                                continue;
 
                             var valueSize = ((FixedSizeTreeHeader.Embedded*)valueReader.Base)->ValueSize;
 

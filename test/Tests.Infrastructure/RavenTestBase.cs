@@ -91,7 +91,7 @@ namespace FastTests
             return await server.ServerStore.DatabasesLandlord.TryGetOrCreateResourceStore(database);
         }
 
-        protected virtual async ValueTask<DatabaseStatistics> GetDatabaseStatisticsAsync(DocumentStore store, string database = null, DatabaseRecord record = null, List<RavenServer> servers = null)
+        protected virtual async ValueTask<DatabaseStatistics> GetDatabaseStatisticsAsync(IDocumentStore store, string database = null, DatabaseRecord record = null, List<RavenServer> servers = null)
         {
             var dbRecord = record ?? await store.Maintenance.Server.SendAsync(new GetDatabaseRecordOperation(database ?? store.Database));
             if (dbRecord.IsSharded)
@@ -267,7 +267,7 @@ namespace FastTests
                         }
                     }
 
-                    if (RavenTestHelper.RunTestsWithDocsCompression && doc.DocumentsCompression == null && isCompressionTest == false)
+                    if (RavenTestHelper.EnvironmentVariables.RunTestsWithDocsCompression && doc.DocumentsCompression == null && isCompressionTest == false)
                     {
                         doc.DocumentsCompression = new DocumentsCompressionConfiguration
                         {
@@ -610,7 +610,7 @@ namespace FastTests
         {
             await WaitAndAssertForValueAsync(async () =>
                 await act().ContinueWith(t =>
-                    t.Exception?.InnerException?.GetType()), typeof(T), timeout, interval);
+                    t.Exception?.Flatten().InnerException?.GetType()), typeof(T), timeout, interval);
         }
 
         protected static async Task<T> AssertWaitForNotNullAsync<T>(Func<Task<T>> act, int timeout = 15000, int interval = 100) where T : class
@@ -1306,5 +1306,25 @@ namespace FastTests
                 return false;
             }
         }
+        
+        protected static Options AllowControlCharactersInIdentifier(Options options = null)
+        {
+            options ??= new Options();
+            var modifyDatabaseRecord = options.ModifyDatabaseRecord;
+            options.ModifyDatabaseRecord = record =>
+            {
+                modifyDatabaseRecord?.Invoke(record);
+
+                // Get all public const string fields from SupportedFeatures class dynamically
+                record.SupportedFeatures = typeof(Constants.DatabaseRecord.SupportedFeatures)
+                    .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                    .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+                    .Select(f => (string)f.GetValue(null))
+                    .Where(x => x != Constants.DatabaseRecord.SupportedFeatures.ThrowControlCharactersInIdentifier)
+                    .ToList();
+            };
+            return options;
+        }
+
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using FastTests;
@@ -16,6 +17,7 @@ using Raven.Server.Utils;
 using Tests.Infrastructure;
 using Tests.Infrastructure.Extensions;
 using Xunit;
+using Raven.Server.Documents.TasksErrors;
 
 namespace SlowTests.Server.Documents.AI.GenAi;
 
@@ -345,15 +347,16 @@ this.Comments[idx].IsSpam = $output.Blocked;
             session.SaveChanges();
         }
 
-        EtlErrorInfo error = null;
+        IEnumerable<TaskItemErrorTableValue> errors = null;
         var value = await WaitForValueAsync(async () =>
         {
-            error = await Etl.TryGetLoadErrorAsync(store.Database, configuration);
-            return error != null;
+            errors = await Etl.GetItemLoadErrorsAsync(store.Database, configuration);
+            return errors.Any();
         }, true, timeout: 60_000);
 
         Assert.True(value);
-        Assert.Contains("rate limit", error?.Error);
+        Assert.NotEmpty(errors);
+        Assert.Contains("rate limit", errors.First().Error);
 
         var stats = etlProcess.GetPerformanceStats()
             .Where(x => x.LastExtractedEtags[EtlItemType.Document] > 0)
@@ -373,13 +376,7 @@ this.Comments[idx].IsSpam = $output.Blocked;
         Assert.Equal(1, modelScope.ModelCallFailures);
 
         var updatePhaseStats = loadDetails.Operations.FirstOrDefault(x => x.Name == GenAiOperations.ApplyUpdateScript) as GenAiPerformanceOperation;
-        Assert.NotNull(updatePhaseStats);
-
-        // nothing should be patched 
-        Assert.Equal(1, updatePhaseStats.NumberOfContextObjects);
-        Assert.Equal(0, updatePhaseStats.TotalUpdates);
-        Assert.Equal(0, updatePhaseStats.TotalCachedContexts);
-        Assert.Equal(0, updatePhaseStats.UpdateFailures);
+        Assert.Null(updatePhaseStats);
     }
 
     [RavenTheory(RavenTestCategory.Ai)]

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using Corax;
 using Corax.Indexing;
@@ -17,11 +17,13 @@ namespace SlowTests.Corax.Bugs;
 
 public class RavenDB_25410(ITestOutputHelper output) : StorageTest(output)
 {
-    [RavenFact(RavenTestCategory.Corax | RavenTestCategory.Querying)]
-    public void BinaryMatchProperlyRetrievesScores()
+    [RavenTheory(RavenTestCategory.Corax | RavenTestCategory.Querying)]
+    [InlineData(BitmapAndFillMode.Off)]
+    [InlineData(BitmapAndFillMode.Force)]
+    public void BinaryMatchProperlyRetrievesScores(BitmapAndFillMode bitmapAndFillMode)
     {
         using var mapping = GetMappingAndIndexDocuments();
-        using var searcher = new IndexSearcher(Env, mapping);
+        using var searcher = new IndexSearcher(Env, mapping) { BitmapAndFillMode = bitmapAndFillMode };
         var startsWith = searcher.StartWithQuery("id()", "t", hasBoost: true);
         var dummyMatch = new DummyMatch();
         
@@ -56,13 +58,13 @@ public class RavenDB_25410(ITestOutputHelper output) : StorageTest(output)
             IQueryMatch sortingMatch;
             if (multiSort)
             {
-                var q = indexSearcher.OrderBy(dummyMatch, [new OrderMetadata(true, MatchCompareFieldType.Score), new OrderMetadata(mapping.GetByFieldId(0).Metadata, true, MatchCompareFieldType.Sequence, fieldHasNoTerms: false)], nullFirst: true);
+                var q = indexSearcher.OrderBy(dummyMatch, [new OrderMetadata(true, MatchCompareFieldType.Score), new OrderMetadata(mapping.GetByFieldId(0).Metadata, true, MatchCompareFieldType.Sequence, fieldHasNoTerms: false)], defaultNullsSortMode: NullsSortMode.NullsSmallest);
                 q.SetSortingDataTransfer(transfer);
                 sortingMatch = q;
             }
             else
             {
-                var q = indexSearcher.OrderBy(dummyMatch, new OrderMetadata(true, MatchCompareFieldType.Score), nullFirst: true);
+                var q = indexSearcher.OrderBy(dummyMatch, new OrderMetadata(true, MatchCompareFieldType.Score), defaultNullsSortMode: NullsSortMode.NullsSmallest);
                 q.SetScoreAndDistanceBuffer(transfer);
                 sortingMatch = q;
             }
@@ -105,7 +107,7 @@ public class RavenDB_25410(ITestOutputHelper output) : StorageTest(output)
         {
             _fillExecuted = true;
             ref var count = ref _count;
-            var toReturn = Math.Min(8, Math.Abs(_count - 16));
+            var toReturn = Math.Min(Math.Min(8, matches.Length), Math.Abs(_count - 16));
             if (toReturn == 0)
                 return 0;
 

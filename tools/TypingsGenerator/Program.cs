@@ -13,6 +13,7 @@ using Raven.Client.Documents.Indexes;
 using Raven.Client.Documents.Indexes.Analysis;
 using Raven.Client.Documents.Indexes.Spatial;
 using Raven.Client.Documents.Operations;
+using Raven.Client.Documents.AI;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Documents.Operations.AI.Agents;
 using Raven.Client.Documents.Operations.Attachments;
@@ -31,6 +32,8 @@ using Raven.Client.Documents.Operations.ETL.SQL;
 using Raven.Client.Documents.Operations.Expiration;
 using Raven.Client.Documents.Operations.Indexes;
 using Raven.Client.Documents.Operations.OngoingTasks;
+using Raven.Client.Documents.Operations.CdcSink.Schema;
+using Raven.Client.Documents.Operations.CdcSink.Test;
 using Raven.Client.Documents.Operations.QueueSink;
 using Raven.Client.Documents.Operations.Refresh;
 using Raven.Client.Documents.Operations.Replication;
@@ -64,6 +67,7 @@ using Raven.Server.Dashboard.Cluster;
 using Raven.Server.Dashboard.Cluster.Notifications;
 using Raven.Server.Dashboard.Cluster.Notifications.DatabaseNotifications;
 using Raven.Server.Documents;
+using Raven.Server.Documents.AI;
 using Raven.Server.Documents.Commands.Replication;
 using Raven.Server.Documents.ETL;
 using Raven.Server.Documents.ETL.Providers.AI.Embeddings.Stats;
@@ -77,6 +81,7 @@ using Raven.Server.Documents.ETL.Providers.Queue.Test;
 using Raven.Server.Documents.ETL.Providers.RelationalDatabase.Common;
 using Raven.Server.Documents.ETL.Providers.RelationalDatabase.Common.Test;
 using Raven.Server.Documents.ETL.Stats;
+using Raven.Server.Documents.TasksErrors;
 using Raven.Server.Documents.Handlers;
 using Raven.Server.Documents.Handlers.Admin;
 using Raven.Server.Documents.Handlers.AI.Agents;
@@ -93,6 +98,7 @@ using Raven.Server.Documents.PeriodicBackup.Restore;
 using Raven.Server.Documents.Queries;
 using Raven.Server.Documents.Queries.Dynamic;
 using Raven.Server.Documents.QueueSink.Stats.Performance;
+using Raven.Server.Documents.CdcSink;
 using Raven.Server.Documents.QueueSink.Test;
 using Raven.Server.Documents.Replication;
 using Raven.Server.Documents.Replication.Stats;
@@ -139,6 +145,8 @@ using LicenseConfiguration = Raven.Server.Config.Categories.LicenseConfiguration
 using Operation = Raven.Server.Documents.Operations.Operation;
 using PatchRequest = Raven.Server.Documents.Patch.PatchRequest;
 using Size = Sparrow.Size;
+using Raven.Server.Documents.CdcSink.Stats.Performance;
+using Raven.Server.Documents.CdcSink.Handlers;
 
 namespace TypingsGenerator
 {
@@ -194,6 +202,7 @@ namespace TypingsGenerator
                 .WithTypeMapping(new TsArray(TsPrimitive.Any, 1), typeof(DynamicJsonArray))
                 .WithTypeMapping(new TsArray(TsPrimitive.Any, 1), typeof(IEnumerable))
                 .WithTypeMapping(new TsArray(TsPrimitive.Any, 1), typeof(IList))
+                .WithTypeMapping(new TsArray(TsPrimitive.Any, 1), typeof(ConversationDocument.MessagesList))
                 .WithTypeMapping(TsPrimitive.Any, typeof(TaskCompletionSource<object>))
                 .WithTypeMapping(TsPrimitive.Any, typeof(BlittableJsonReaderObject));
 
@@ -320,9 +329,10 @@ namespace TypingsGenerator
             scripter.AddType(typeof(NewVersionAvailableDetails));
             scripter.AddType(typeof(MessageDetails));
             scripter.AddType(typeof(ExceptionDetails));
+            scripter.AddType(typeof(EtlTaskHealthChangeDetails));
 
             // alerts
-            scripter.AddType(typeof(EtlErrorsDetails));
+            scripter.AddType(typeof(EtlWarningDetails));
             scripter.AddType(typeof(SlowSqlDetails));
             scripter.AddType(typeof(SlowIoDetails));
             scripter.AddType(typeof(ServerLimitsDetails));
@@ -426,6 +436,23 @@ namespace TypingsGenerator
             scripter.AddType(typeof(DatabaseNotificationsSummaryPayload));
             scripter.AddType(typeof(DatabaseNotificationsSummaryRequestConfig));
 
+            // debug package analyzer (RavenDB-24115) - reuses the dashboard payloads above
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.DebugPackageAnalysisSummary));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.DebugPackageNodeAnalysisSummary));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Issues.DebugPackageAnalysisIssues));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Issues.DetectedIssue));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Issues.IssueSeverity));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Issues.IssueCategory));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Errors.DebugPackageAnalyzeErrors));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Errors.AnalyzeError));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Errors.AnalyzeErrorSeverity));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Results.CpuUsageAnalysisInfo));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Results.Memory.MemoryAnalysisInfo));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Results.Memory.ManagedMemoryAnalysisInfo));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Results.Memory.UnmanagedMemoryAnalysisInfo));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Results.NetworkAnalysisInfo));
+            scripter.AddType(typeof(Raven.Server.Documents.Handlers.Debugging.DebugPackage.Analyzers.Results.TcpConnections));
+
             // data archival
             scripter.AddType(typeof(DataArchivalConfiguration));
 
@@ -490,6 +517,7 @@ namespace TypingsGenerator
             scripter.AddType(typeof(ModifyOngoingTaskResult));
             scripter.AddType(typeof(Transformation));
             scripter.AddType(typeof(SchemaType));
+            scripter.AddType(typeof(TaskErrors));
 
             // ongoing tasks - replication
             scripter.AddType(typeof(OngoingTaskReplication));
@@ -586,6 +614,18 @@ namespace TypingsGenerator
             scripter.AddType(typeof(TestQueueSinkScript));
             scripter.AddType(typeof(TestQueueSinkScriptResult));
 
+            // ongoing tasks - CDC Sink
+            scripter.AddType(typeof(OngoingTaskCdcSink));
+            scripter.AddType(typeof(TestCdcSinkMappingRequest));
+            scripter.AddType(typeof(TestCdcSinkMappingResult));
+            scripter.AddType(typeof(CdcSinkSchemaRequest));
+            scripter.AddType(typeof(CdcSinkSourceSchema));
+            scripter.AddType(typeof(CdcSinkPerformanceStats));
+            scripter.AddType(typeof(CdcSinkProcessPerformanceStats));
+            scripter.AddType(typeof(CdcSinkTaskPerformanceStats));
+            scripter.AddType(typeof(CdcTestRequest));
+            scripter.AddType(typeof(CdcTestResult));
+
             // ongoing tasks - Snowflake ETL
             scripter.AddType(typeof(OngoingTaskSnowflakeEtl));
             scripter.AddType(typeof(SnowflakeEtlConfiguration));
@@ -615,8 +655,14 @@ namespace TypingsGenerator
             scripter.AddType(typeof(AiAgentConfiguration));
             scripter.AddType(typeof(RequestBody));
             scripter.AddType(typeof(AiAgentProcessorForTestConversation.AiAgentTestRequest));
+            scripter.AddType(typeof(AiAgentProcessorForTestConversation.AiAgentTestResult));
             scripter.AddType(typeof(AiAgentActionRequest));
             scripter.AddType(typeof(ConversionRequestBody));
+            scripter.AddType(typeof(AiOutputOptions));
+
+            // ongoing tasks - ETLs
+            scripter.AddType(typeof(EtlTaskStats));
+            scripter.AddType(typeof(EtlProcessTransformationStats));
 
             // connection strings
             scripter.AddType(typeof(ConnectionString));
@@ -655,6 +701,7 @@ namespace TypingsGenerator
             scripter.AddType(typeof(TrafficWatchTcpChange));
 
             scripter.AddType(typeof(NodeConnectionTestResult));
+            scripter.AddType(typeof(AiConnectionTestResult));
             scripter.AddType(typeof(ClientCertificateGenerationResult));
 
             // request with POST parameters

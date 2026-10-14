@@ -21,7 +21,35 @@ class collectionsTracker {
 
     conflictsCount = ko.observable<number>();
 
+    systemCollectionsExpanded = ko.observable<boolean>(false);
+
+    systemCollections = ko.pureComputed<collection[]>(() => {
+        return this.collections().filter(x => x.isSystem);
+    });
+
+    userCollections = ko.pureComputed<collection[]>(() => {
+        return this.collections().filter(x => !x.isAllDocuments && !x.isSystem);
+    });
+
+    systemCollectionsDocumentCount = ko.pureComputed<number>(() => {
+        return this.systemCollections().reduce((total, c) => total + c.documentCount(), 0);
+    });
+
+    systemCollectionsCountPrefix = ko.pureComputed<string>(() => {
+        return generalUtils.getCountPrefix(this.systemCollectionsDocumentCount());
+    });
+
+    systemCollectionsSizeClass = ko.pureComputed<string>(() => {
+        return generalUtils.getSizeClass(this.systemCollectionsDocumentCount());
+    });
+
+    toggleSystemCollections() {
+        this.systemCollectionsExpanded(!this.systemCollectionsExpanded());
+    }
+
     private db: database;
+
+    private loadedDatabase: database;
 
     private events = {
         created: [] as Array<(coll: collection) => void>,
@@ -32,29 +60,55 @@ class collectionsTracker {
 
     onDatabaseChanged(db: database) {
         this.db = db;
-        
-        this.loadStatsTask = new getCollectionsStatsCommand(db)
-            .execute()
-            .done(stats => this.collectionsLoaded(stats));
-
+        this.loadStats(db);
         this.configureRevisions(db);
 
         return this.loadStatsTask;
     }
 
-    async configureRevisions(db: database) {
-        const revisionsPreview = await new getRevisionsPreviewCommand.default({
+    reloadStats() {
+        this.loadStats(this.db);
+    }
+
+    private loadStats(db: database) {
+        storeCompat.globalDispatch(collectionsTrackerSlice.collectionsTrackerActions.collectionsLoadStarted());
+
+        const task = new getCollectionsStatsCommand(db).execute();
+        this.loadStatsTask = task;
+
+        task
+            .done(stats => {
+                if (task === this.loadStatsTask) {
+                    this.collectionsLoaded(stats, db);
+                }
+            })
+            .fail(() => {
+                if (task === this.loadStatsTask) {
+                    storeCompat.globalDispatch(collectionsTrackerSlice.collectionsTrackerActions.collectionsLoadFailed(db.name));
+                }
+            });
+    }
+
+    configureRevisions(db: database) {
+        new getRevisionsPreviewCommand.default({
             databaseName: db.name,
             start: 0,
             pageSize: 0,
             type: "All",
-        }).execute();
+        })
+            .execute()
+            .done(revisionsPreview => {
+                if (db !== this.db) {
+                    return;
+                }
 
-        this.allRevisions(new collection(collection.allRevisionsCollectionName, revisionsPreview.totalResultCount));
-        this.revisionsBin(new collection(collection.revisionsBinCollectionName));
+                this.allRevisions(new collection(collection.allRevisionsCollectionName, revisionsPreview.totalResultCount));
+                this.revisionsBin(new collection(collection.revisionsBinCollectionName));
+            });
     }
 
-    private collectionsLoaded(collectionsStats: collectionsStats) {
+    private collectionsLoaded(collectionsStats: collectionsStats, db: database) {
+        this.loadedDatabase = db;
         const collections = collectionsStats.collections.filter(x => x.documentCount());
         
         collections.sort((a, b) => this.sortAlphaNumericCollection(a.name, b.name));
@@ -62,7 +116,14 @@ class collectionsTracker {
         this.collections([allDocsCollection].concat(collections));
 
         this.conflictsCount(collectionsStats.numberOfConflicts);
-        storeCompat.globalDispatch(collectionsTrackerSlice.collectionsTrackerActions.collectionsLoaded(this.collections().map((x) => x.toCollectionState())));
+        this.dispatchCollectionsLoaded();
+    }
+
+    private dispatchCollectionsLoaded() {
+        storeCompat.globalDispatch(collectionsTrackerSlice.collectionsTrackerActions.collectionsLoaded({
+            databaseName: this.loadedDatabase?.name ?? null,
+            collections: this.collections().map((x) => x.toCollectionState()),
+        }));
     }
 
     getCollectionCount(collectionName: string) {
@@ -81,6 +142,13 @@ class collectionsTracker {
     }    
     
     onDatabaseStatsChanged(notification: Raven.Server.NotificationCenter.Notifications.DatabaseStatsChanged) {
+        if (this.loadedDatabase !== this.db) {
+            if (this.loadStatsTask.state() === "rejected") {
+                this.loadStats(this.db);
+            }
+            return;
+        }
+
         const removedCollections = notification.ModifiedCollections.filter(x => x.Count < 1);
         const changedCollections = notification.ModifiedCollections.filter(x => x.Count >= 1);
         const totalCount = notification.CountOfDocuments;
@@ -112,7 +180,8 @@ class collectionsTracker {
         });
         
         this.conflictsCount(notification.CountOfConflicts);
-        storeCompat.globalDispatch(collectionsTrackerSlice.collectionsTrackerActions.collectionsLoaded(this.collections().map((x) => x.toCollectionState())));
+        this.dispatchCollectionsLoaded();
+        storeCompat.globalDispatch(collectionsTrackerSlice.collectionsTrackerActions.globalChangeVectorUpdated(notification.GlobalChangeVector));
     }
 
     getCollectionNames() {

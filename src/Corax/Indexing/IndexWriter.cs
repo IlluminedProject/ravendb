@@ -85,6 +85,23 @@ namespace Corax.Indexing
         private PostingList _largePostingListSet;
         public int? MaximumConcurrentBatchesForHnswAcceleration;
 
+        /// <summary>
+        /// Per-field set of node ids whose container record was rewritten by the just-finished
+        /// vector commit. Populated as each <see cref="Hnsw.Registration.Commit"/> completes and
+        /// drained by the post-commit hook via <see cref="DrainDirtyVectorSets"/>; the registration
+        /// itself is cleared on field reset, so this dictionary is the only surviving handle to
+        /// the dirty set after <see cref="ResetWriter"/> runs.
+        /// </summary>
+        private Dictionary<Slice, HashSet<long>> _dirtyVectorSets;
+
+        /// <summary>
+        /// Per-field set of node ids that the just-finished commit rewrote in the underlying
+        /// HNSW container. Read by <c>CoraxIndexPersistence.RecreateSearcher</c> to apply
+        /// incremental updates to the long-lived <c>HnswIndexCache</c>; null when no vector
+        /// field saw any modification.
+        /// </summary>
+        public Dictionary<Slice, HashSet<long>> DirtyVectorSets => _dirtyVectorSets;
+
         private long _compactTreeDictionaryId = Constants.IndexSearcher.InvalidId;
         private EntriesToTermsTracker _entriesToTermsTracker;
 
@@ -665,8 +682,11 @@ namespace Corax.Indexing
                     longTermLocation = newIndex;
                 }
 
+                // Even though reader.Frequency comes from the textual term, we deliberately apply it to the numerical terms as well.
+                // This is important because older indexes (pre RavenDB-27171) wrote the frequency into the numerical entry ids, so the removal must carry the same frequency to match them.
+                // For newer indexes this is a no-op, since we will override the frequency to 1 anyway.
                 term = ref field.Storage.GetAsRef(longTermLocation);
-                term.Removal(_entriesAllocator, entryToDelete, termsPerEntryIndex, freq: 1, InserterMode.Numerical);
+                term.Removal(_entriesAllocator, entryToDelete, termsPerEntryIndex, reader.Frequency, InserterMode.Numerical);
 
                 // RavenDB-25907: Sentinel value pattern for atomic Dictionary+Storage update.
                 ref var doubleTermLocation = ref CollectionsMarshal.GetValueRefOrAddDefault(field.Doubles, reader.CurrentDouble, out exists);
@@ -679,7 +699,7 @@ namespace Corax.Indexing
                 }
 
                 term = ref field.Storage.GetAsRef(doubleTermLocation);
-                term.Removal(_entriesAllocator, entryToDelete, termsPerEntryIndex, freq: 1, InserterMode.Numerical);
+                term.Removal(_entriesAllocator, entryToDelete, termsPerEntryIndex, reader.Frequency, InserterMode.Numerical);
             }
         }
 
@@ -1094,6 +1114,19 @@ namespace Corax.Indexing
                     if (MaximumConcurrentBatchesForHnswAcceleration != null)
                         indexedField.VectorIndexer.MaxConcurrentBatches = MaximumConcurrentBatchesForHnswAcceleration.Value;
                     indexedField.VectorIndexer.Commit(token);
+
+                    // Snapshot DirtyNodeIds before ResetWriter clears the field's VectorIndexer.
+                    // The post-commit hook (CoraxIndexPersistence.RecreateSearcher) consumes this
+                    // to apply incremental updates against the long-lived HnswIndexCache.
+                    if (indexedField.VectorIndexer.DirtyNodeIds.Count > 0)
+                    {
+                        _dirtyVectorSets ??= new Dictionary<Slice, HashSet<long>>(SliceComparer.Instance);
+                        // FlushBatch may be called multiple times during a single voron tx commit, so we need to merge the dirty node IDs across calls
+                        if (_dirtyVectorSets.TryGetValue(indexedField.Name, out var existing))
+                            existing.UnionWith(indexedField.VectorIndexer.DirtyNodeIds);
+                        else
+                            _dirtyVectorSets[indexedField.Name] = new HashSet<long>(indexedField.VectorIndexer.DirtyNodeIds);
+                    }
                 }
 
                 if (indexedField.Textual.Count == 0)

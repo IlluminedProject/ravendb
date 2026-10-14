@@ -1,12 +1,9 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using FastTests;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using Raven.Client.Documents.AI;
 using Raven.Client.Documents.Operations.AI;
 using Raven.Client.Documents.Operations.AI.Agents;
@@ -42,7 +39,7 @@ namespace SlowTests.Server.Documents.AI.AiAgent
         }
 
         [RavenTheory(RavenTestCategory.Ai)]
-        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
         public async Task ArrayParameter(Options options, GenAiConfiguration config)
         {
             using var store = GetDocumentStore(options);
@@ -89,17 +86,21 @@ namespace SlowTests.Server.Documents.AI.AiAgent
             var aviv = more.Answer;
             Assert.NotNull(aviv.Answer);
 
-            using (var session = store.OpenAsyncSession())
+            var result = await store.AI.GetConversationMessagesAsync(new GetConversationMessagesOptions
             {
-                var messages = (await session.LoadAsync<Chat>(chat.Id)).Messages;
-                var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(messages[4].Content.ToString()); // query results
-                Assert.Equal(1, toolCallAnswer.Count);
-                Assert.Equal("Aviv", toolCallAnswer.FirstOrDefault()?.Author);
-            }
+                ConversationId = chat.Id,
+                DetailLevel = AiConversationDetailLevel.Detailed,
+                PageSize = 50
+            });
+            var toolCallMsg = result.Messages.Find(m => m.ToolCalls is { Count: > 0 });
+            Assert.NotNull(toolCallMsg);
+            var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(toolCallMsg.ToolCalls[0].Result);
+            Assert.Equal(1, toolCallAnswer.Count);
+            Assert.Equal("Aviv", toolCallAnswer.FirstOrDefault()?.Author);
         }
 
         [RavenTheory(RavenTestCategory.Ai)]
-        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
         public async Task IntParameter(Options options, GenAiConfiguration config)
         {
             using var store = GetDocumentStore(options);
@@ -147,17 +148,21 @@ namespace SlowTests.Server.Documents.AI.AiAgent
             var shahar = more.Answer;
             Assert.NotNull(shahar.Answer);
 
-            using (var session = store.OpenAsyncSession())
+            var result = await store.AI.GetConversationMessagesAsync(new GetConversationMessagesOptions
             {
-                var messages = (await session.LoadAsync<Chat>(chat.Id)).Messages;
-                var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(messages[4].Content.ToString()); // query results
-                Assert.Equal(1, toolCallAnswer.Count);
-                Assert.Equal("Shahar", toolCallAnswer.FirstOrDefault()?.Author);
-            }
+                ConversationId = chat.Id,
+                DetailLevel = AiConversationDetailLevel.Detailed,
+                PageSize = 50
+            });
+            var toolCallMsg = result.Messages.Find(m => m.ToolCalls is { Count: > 0 });
+            Assert.NotNull(toolCallMsg);
+            var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(toolCallMsg.ToolCalls[0].Result);
+            Assert.Equal(1, toolCallAnswer.Count);
+            Assert.Equal("Shahar", toolCallAnswer.FirstOrDefault()?.Author);
         }
 
         [RavenTheory(RavenTestCategory.Ai)]
-        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
         public async Task DoubleParameter(Options options, GenAiConfiguration config)
         {
             using var store = GetDocumentStore(options);
@@ -205,17 +210,21 @@ namespace SlowTests.Server.Documents.AI.AiAgent
             var shahar = more.Answer;
             Assert.NotNull(shahar.Answer);
 
-            using (var session = store.OpenAsyncSession())
+            var result = await store.AI.GetConversationMessagesAsync(new GetConversationMessagesOptions
             {
-                var messages = (await session.LoadAsync<Chat>(chat.Id)).Messages;
-                var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(messages[4].Content.ToString()); // query results
-                Assert.Equal(1, toolCallAnswer.Count);
-                Assert.Equal("Shahar", toolCallAnswer.FirstOrDefault()?.Author);
-            }
+                ConversationId = chat.Id,
+                DetailLevel = AiConversationDetailLevel.Detailed,
+                PageSize = 50
+            });
+            var toolCallMsg = result.Messages.Find(m => m.ToolCalls is { Count: > 0 });
+            Assert.NotNull(toolCallMsg);
+            var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(toolCallMsg.ToolCalls[0].Result);
+            Assert.Equal(1, toolCallAnswer.Count);
+            Assert.Equal("Shahar", toolCallAnswer.FirstOrDefault()?.Author);
         }
 
         [RavenTheory(RavenTestCategory.Ai)]
-        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi, DatabaseMode = RavenDatabaseMode.Single)]
+        [RavenGenAiData(IntegrationType = RavenAiIntegration.OpenAi | RavenAiIntegration.Ollama, DatabaseMode = RavenDatabaseMode.Single)]
         public async Task BoolParameter(Options options, GenAiConfiguration config)
         {
             using var store = GetDocumentStore(options);
@@ -262,30 +271,17 @@ namespace SlowTests.Server.Documents.AI.AiAgent
             var shahar = more.Answer;
             Assert.NotNull(shahar.Answer);
 
-            using (var session = store.OpenAsyncSession())
+            var result = await store.AI.GetConversationMessagesAsync(new GetConversationMessagesOptions
             {
-                var messages = (await session.LoadAsync<Chat>(chat.Id)).Messages;
-                var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(messages[4].Content.ToString()); // query results
-                Assert.Equal(1, toolCallAnswer.Count);
-                Assert.Equal("Karmel", toolCallAnswer.FirstOrDefault()?.Author);
-            }
-        }
-
-        private class Chat
-        {
-            public List<ChatMessage> Messages { get; set; }
-        }
-
-        public class ChatMessage
-        {
-            [JsonPropertyName("role")]
-            public string Role { get; set; }
-
-            [JsonPropertyName("content")]
-            public JToken Content { get; set; }
-
-            [JsonPropertyName("date")]
-            public DateTime Date { get; set; }
+                ConversationId = chat.Id,
+                DetailLevel = AiConversationDetailLevel.Detailed,
+                PageSize = 50
+            });
+            var toolCallMsg = result.Messages.Find(m => m.ToolCalls is { Count: > 0 });
+            Assert.NotNull(toolCallMsg);
+            var toolCallAnswer = JsonConvert.DeserializeObject<List<Question>>(toolCallMsg.ToolCalls[0].Result);
+            Assert.Equal(1, toolCallAnswer.Count);
+            Assert.Equal("Karmel", toolCallAnswer.FirstOrDefault()?.Author);
         }
     }
 }

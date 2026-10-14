@@ -34,6 +34,7 @@ import collectionsTracker = require("common/helpers/database/collectionsTracker"
 import footer = require("common/shell/footer");
 import chooseTheme = require("viewmodels/shell/chooseTheme");
 import continueTest = require("common/shell/continueTest");
+import shellAccessor = require("common/shell/shellAccessor");
 import globalSettings = require("common/settings/globalSettings");
 
 import protractedCommandsDetector = require("common/notifications/protractedCommandsDetector");
@@ -148,6 +149,7 @@ class shell extends viewModelBase {
         super();
 
         shell.instance = this;
+        shellAccessor.registerShell(this);
 
         this.studioLoadingFakeRequest = protractedCommandsDetector.instance.requestStarted(0);
 
@@ -371,6 +373,16 @@ class shell extends viewModelBase {
                             }
                         }
                     );
+                    studioSettings.default.registerOnSettingChangedHandler(
+                        (name) => name === "tableFont",
+                        (_name, setting: simpleStudioSetting<string>) =>
+                            shell.applyTableFont(setting.getValue())
+                    );
+                    studioSettings.default.registerOnSettingChangedHandler(
+                        (name) => name === "monospaceFont",
+                        (_name, setting: simpleStudioSetting<string>) =>
+                            shell.applyMonospaceFont(setting.getValue())
+                    );
 
                     // bind event handles before we connect to server wide notification center
                     // (connection will be started after executing this method) - it was just scheduled 2 lines above
@@ -426,6 +438,25 @@ class shell extends viewModelBase {
             } else {
                 this.serverEnvironment(null);
             }
+        }
+
+        shell.applyTableFont(settings.tableFont.getValue());
+        shell.applyMonospaceFont(settings.monospaceFont.getValue());
+    }
+
+    static applyTableFont(value: string) {
+        if (value === "default") {
+            document.documentElement.style.removeProperty("--table-font");
+        } else {
+            document.documentElement.style.setProperty("--table-font", `"${value}"`);
+        }
+    }
+
+    static applyMonospaceFont(value: string) {
+        if (value === "default") {
+            document.documentElement.style.removeProperty("--monospace-font");
+        } else {
+            document.documentElement.style.setProperty("--monospace-font", `"${value}"`);
         }
     }
 

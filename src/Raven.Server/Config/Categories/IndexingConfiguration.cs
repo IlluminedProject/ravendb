@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
+using Corax.Utils;
 using Microsoft.Extensions.Configuration;
 using Raven.Client;
 using Raven.Client.Documents.DataArchival;
@@ -217,7 +218,7 @@ namespace Raven.Server.Config.Categories
 
         [Description("EXPERT: Number of concurrent stopped batches if running low on memory")]
         [DefaultValue(2)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.NumberOfConcurrentStoppedBatchesIfRunningLowOnMemory", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int NumberOfConcurrentStoppedBatchesIfRunningLowOnMemory { get; protected set; }
 
@@ -547,21 +548,21 @@ namespace Raven.Server.Config.Categories
         [Description("Max time to wait when forcing the storage environment flush and sync when replacing side-by-side index.")]
         [DefaultValue(30)]
         [TimeUnit(TimeUnit.Seconds)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.MaxTimeToWaitAfterFlushAndSyncWhenReplacingSideBySideIndexInSec", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public TimeSetting MaxTimeToWaitAfterFlushAndSyncWhenReplacingSideBySideIndex { get; protected set; }
 
         [Description("Minimum total size of journals to run flush and sync when replacing side by side index.")]
         [DefaultValue(512)]
         [SizeUnit(SizeUnit.Megabytes)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.MinimumTotalSizeOfJournalsToRunFlushAndSyncWhenReplacingSideBySideIndexInMb",
             ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public Size MinimumTotalSizeOfJournalsToRunFlushAndSyncWhenReplacingSideBySideIndex { get; set; }
         
         [Description("Sort by ticks when field contains dates. When sorting in descending order, null dates are returned at the end with this option enabled.")]
         [DefaultValue(true)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.OrderByTicksAutomaticallyWhenDatesAreInvolved", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public bool OrderByTicksAutomaticallyWhenDatesAreInvolved { get; set; }
 
@@ -613,13 +614,13 @@ namespace Raven.Server.Config.Categories
         [DefaultValue(10)]
         [MinValue(1)]
         [TimeUnit(TimeUnit.Minutes)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.ElapsedSinceQueriedPersistIntervalInMin", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public TimeSetting ElapsedSinceQueriedPersistInterval { get; set; }
         
         [Description("The default minimum similarity for vector search (0.0f - 1.0f, default is 0f)")]
         [DefaultValue(0f)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.DefaultMinimumSimilarity", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public float CoraxVectorSearchDefaultMinimumSimilarity { get; protected set; }
         
@@ -637,7 +638,7 @@ namespace Raven.Server.Config.Categories
         
         [Description("The default maximum number of vectors that we will return from a graph search.")]
         [DefaultValue(16)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.DefaultNumberOfCandidatesForQuerying", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int CoraxVectorDefaultNumberOfCandidatesForQuerying { get; protected set; }
         
@@ -655,7 +656,7 @@ namespace Raven.Server.Config.Categories
 
         [Description("Expert: The maximum number of concurrent batches for HNSW distance computation acceleration.")]
         [DefaultValue(512)]
-        [IndexUpdateType(IndexUpdateType.None)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.Corax.VectorSearch.MaximumConcurrentBatchesForHnswAcceleration", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int MaximumConcurrentBatchesForHnswAcceleration { get; set; }
         
@@ -665,17 +666,44 @@ namespace Raven.Server.Config.Categories
         [ConfigurationEntry("Indexing.Corax.VectorSearch.VectorSearchScanningThreshold", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public int CoraxVectorSearchScanningThreshold { get; set; }
 
+        [Description("The maximum amount of memory for the HNSW vector search node cache per index. " +
+                     "This cache pre-loads upper-level graph nodes to accelerate vector queries. " +
+                     "Changing this value does not require re-indexing. " +
+                     "The cache is incompatible with encrypted databases; there it is ignored and vector search reads from disk.")]
+        [DefaultValue(10)]
+        [SizeUnit(SizeUnit.Megabytes)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.Corax.VectorSearch.CacheSizeInMb", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
+        public Size CoraxVectorSearchCacheSize { get; set; }
+
         [Description("Use default search analyzer for dynamic fields if not set explicitly.")]
         [DefaultValue(false)]
         [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.Querying.UseSearchAnalyzerForDynamicFieldsIfNotSetExplicitlyInSearchQuery", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
         public bool UseSearchAnalyzerForDynamicFieldsIfNotSetExplicitlyInSearchQuery { get; protected set; }
         
-        [Description("Corax: Null values appear first when sorting in ascending order.")]
-        [DefaultValue(true)]
+        // Backward-compatibility
+        [Description("[OBSOLETE] Use: 'Indexing.Querying.Corax.NullsSortMode' instead.")]
+        [DefaultValue(null)]
         [IndexUpdateType(IndexUpdateType.Refresh)]
         [ConfigurationEntry("Indexing.Querying.Corax.NullFirst", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
-        public bool NullFirst { get; protected set; }
+        public bool? NullFirstLegacy
+        {
+            get => _nullFirstLegacy;
+            protected set
+            {
+                _nullFirstLegacy = value;
+                if (value.HasValue)
+                    NullsSortMode = value.Value ? NullsSortMode.NullsSmallest : NullsSortMode.NullsLargest;
+            }
+        }
+        private bool? _nullFirstLegacy;
+
+        [Description("Corax: when set to Smallest, null values are treated as the smallest possible key (so they sort first in ascending order, last in descending order).")]
+        [DefaultValue(DefaultValueSetInConstructor)]
+        [IndexUpdateType(IndexUpdateType.Refresh)]
+        [ConfigurationEntry("Indexing.Querying.Corax.NullsSortMode", ConfigurationEntryScope.ServerWideOrPerDatabaseOrPerIndex)]
+        public NullsSortMode NullsSortMode { get; protected set; } = NullsSortMode.NullsSmallest;
         
         protected override void ValidateProperty(PropertyInfo property)
         {

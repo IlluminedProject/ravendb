@@ -32,8 +32,7 @@ namespace Tests.Infrastructure.XunitExtensions
         protected override async ValueTask<RunSummary> RunTestMethod(
             XunitTestClassRunnerContext ctxt,
             IXunitTestMethod testMethod,
-            IReadOnlyCollection<IXunitTestCase> testCases,
-            object[] constructorArguments)
+            IReadOnlyCollection<IXunitTestCase> testCases)
         {
             var enabled = PerformanceTestState.ResourceSnapshotEnabled;
             var writer = PerformanceTestState.Writer;
@@ -54,7 +53,7 @@ namespace Tests.Infrastructure.XunitExtensions
                 writer.WriteResourceSnapshot(TestStage.TestStarted, testMethod);
             }
 
-            var runSummary = await base.RunTestMethod(ctxt, testMethod, testCases, constructorArguments);
+            var runSummary = await base.RunTestMethod(ctxt, testMethod, testCases);
 
             if (!skipTestResourceSnapshot && writer != null)
             {
@@ -80,8 +79,7 @@ namespace Tests.Infrastructure.XunitExtensions
             return testMethod.Method.GetCustomAttributes(TheoryType, true).Length > 0;
         }
 
-        private static bool IsTestExecutionSamplingEnabled()
-            => bool.TryParse(Environment.GetEnvironmentVariable("TEST_RESOURCE_ANALYZER_SAMPLING"), out var value) && value;
+        private static bool IsTestExecutionSamplingEnabled() => RavenTestHelper.EnvironmentVariables.TestResourceAnalyzerSampling;
 
         private static TestMetrics.TestResult GetTestResult(RunSummary runSummary)
         {
