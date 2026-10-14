@@ -19,6 +19,16 @@ Modern ACID NoSQL Database</h1>
 
 [RavenDB](https://ravendb.net/) is a NoSQL database forged in the flames of passion, by the people frustrated with the state of database industry. Fusing extreme performance and tranquility of ease-of-use, RavenDB offers **above-the-roof developer experience**. While we take the heavy lifting of managing your data (and a lot more..) on our shoulders, you can focus on your system and application code.
 
+## Optional local embeddings
+
+Build or publish with `-p:RavenEnableLocalEmbeddings=false` to omit local model/vocabulary downloads and the ONNX/FastBertTokenizer runtime. The option defaults to `true`.
+
+Remote AI providers, AI tasks, and precomputed vector indexing/search remain available. Tokenizers used for remote-provider text chunking are retained. Local text embedding generation fails explicitly with `NotSupportedException`; remote `ai.task` queries remain supported.
+
+```sh
+dotnet publish src/Raven.Server/Raven.Server.csproj -c Release -p:RavenEnableLocalEmbeddings=false
+```
+
 ## We're 
 
 - Completely open-source (AGPLv3)
