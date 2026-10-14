@@ -2569,6 +2569,14 @@ function execute(doc, args){
 
             private void HandleVector(string methodName, List<QueryExpression> arguments, bool withoutAlias, BlittableJsonReaderObject parameters)
             {
+#if RAVEN_NO_LOCAL_EMBEDDINGS
+                if (arguments.Count > 0 && arguments[0] is MethodExpression embeddingExpression &&
+                    (QueryMethod.GetMethodType(embeddingExpression.Name.Value) is MethodType.Embedding_Text or MethodType.Embedding_Text_I8 or MethodType.Embedding_Text_I1) &&
+                    embeddingExpression.Arguments.Count == 1)
+                {
+                    throw new NotSupportedException("Local text embedding generation is disabled in this build (RavenEnableLocalEmbeddings=false). Supply precomputed vectors or use a remote embeddings generation task instead.");
+                }
+#endif
                 QueryFieldName fieldName;
                 string embeddingsGenerationTaskIdentifier = null;
 

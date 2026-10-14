@@ -1,21 +1,29 @@
 #pragma warning disable SKEXP0070
 using System;
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
 using System.Collections.Generic;
 using System.Globalization;
+#endif
 using System.IO;
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
 using System.Linq;
 using System.Reflection;
+#endif
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
 using System.Text;
 using FastBertTokenizer;
 using Microsoft.Extensions.AI;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.SemanticKernel.Connectors.Onnx;
 using Microsoft.SemanticKernel.Embeddings;
+#endif
 using Raven.Client.Documents.Indexes.Vector;
 using Raven.Client.Documents.Queries.Vector;
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
 using Raven.Server.Config;
+#endif
 using Sparrow;
 using Sparrow.Platform;
 using Sparrow.Server;
@@ -26,11 +34,14 @@ namespace Raven.Server.Documents.Indexes.VectorSearch;
 
 public static class GenerateEmbeddings
 {
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
     private static readonly ConstructorInfo BertOnnxTextEmbeddingGenerationServiceCtor;
+#endif
 
     // Dimensions (buffer size) from internals of SmartComponents.
     public const int F32Size = 1536;
 
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
     private static Lazy<SessionOptions> OnnxSessionOptions = new(() => null);
 
     internal static readonly Lazy<IEmbeddingGenerator<string, Embedding<float>>> Embedder = new(() => CreateTextEmbeddingGenerationService());
@@ -70,14 +81,19 @@ public static class GenerateEmbeddings
 
     [ThreadStatic]
     private static List<string> List;
+#endif
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static VectorValue FromText(ByteStringContext allocator, in VectorOptions options, in string text)
     {
+#if RAVEN_NO_LOCAL_EMBEDDINGS
+        throw new NotSupportedException("Local text embedding generation is disabled in this build (RavenEnableLocalEmbeddings=false). Supply precomputed vectors or use a remote embeddings generation task instead.");
+#else
         var embedding = CreateEmbeddingViaSmartComponentsLocalEmbedding(allocator, text, F32Size);
         return options.DestinationEmbeddingType is VectorEmbeddingType.Single
             ? new VectorValue(embedding.MemoryScope, embedding.Memory, embedding.UsedBytes) :
             Quantize(allocator, options.DestinationEmbeddingType, embedding.MemoryScope, embedding.Memory, embedding.UsedBytes);
+#endif
     }
 
     public static VectorValue FromArray(ByteStringContext allocator, ReadOnlySpan<byte> embedding, in VectorOptions options)
@@ -242,6 +258,7 @@ public static class GenerateEmbeddings
         return embeddings;
     }
     
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
     private static (IDisposable MemoryScope, Memory<byte> Memory, int UsedBytes) CreateEmbeddingViaSmartComponentsLocalEmbedding(ByteStringContext allocator, in string text, in int dimensions)
     {
         List ??= new List<string>(1);
@@ -295,5 +312,6 @@ public static class GenerateEmbeddings
             return service.AsEmbeddingGenerator();
         }
     }
+#endif
 }
 #pragma warning restore SKEXP0070

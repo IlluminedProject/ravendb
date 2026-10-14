@@ -16,6 +16,10 @@
     <EnablePreviewFeatures>True</EnablePreviewFeatures>
     <GenerateRequiresPreviewFeaturesAttribute>True</GenerateRequiresPreviewFeaturesAttribute>
     <TieredPGO>True</TieredPGO>
+    <RavenEnableLocalEmbeddings Condition="'$(RavenEnableLocalEmbeddings)' == ''">true</RavenEnableLocalEmbeddings>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RavenEnableLocalEmbeddings)' == 'false'">
+    <DefineConstants>$(DefineConstants);RAVEN_NO_LOCAL_EMBEDDINGS</DefineConstants>
   </PropertyGroup>
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <Compile Include="..\CommonAssemblyInfo.Windows.cs" Link="Properties\CommonAssemblyInfo.Windows.cs" />
@@ -182,7 +186,7 @@
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.HuggingFace" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.MistralAI" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.Ollama" />
-    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Onnx" />
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Onnx" Condition="'$(RavenEnableLocalEmbeddings)' != 'false'" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.OpenAI" />
     <PackageReference Include="MySqlConnector" />
     <PackageReference Include="NCrontab.Advanced" />
@@ -261,5 +265,5 @@
       <ResolvedFileToPublish ExcludeFromSingleFile="true" Condition="'%(ResolvedFileToPublish.Identity)' == '$(ProjectRuntimeConfigFilePath)'" />
     </ItemGroup>
   </Target>
-  <Import Project="../DownloadEmbeddings.targets" />
+  <Import Project="../DownloadEmbeddings.targets" Condition="'$(RavenEnableLocalEmbeddings)' != 'false'" />
 </Project>

@@ -50,8 +50,12 @@ public static class AiExtensions
 
     public static IKernelBuilder AddCustomBertOnnxTextEmbeddingGeneration(this IKernelBuilder builder, string serviceId = null)
     {
+#if RAVEN_NO_LOCAL_EMBEDDINGS
+        throw new NotSupportedException("The embedded AI provider is disabled in this build (RavenEnableLocalEmbeddings=false). Use a remote AI provider instead.");
+#else
         builder.Services.AddKeyedSingleton(serviceId, GenerateEmbeddings.Embedder.Value);
         return builder;
+#endif
     }
 
 

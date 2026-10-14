@@ -170,7 +170,9 @@ namespace Raven.Server
                 configuration.AddCommandLine(configurationArgs);
 
             configuration.Initialize();
+#if !RAVEN_NO_LOCAL_EMBEDDINGS
             GenerateEmbeddings.Configure(configuration);
+#endif
 
             HybridArray.UseOnlyManagedArray = PlatformDetails.Is32Bits || configuration.Storage.ForceUsing32BitsPager;
 
