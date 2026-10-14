@@ -26,6 +26,7 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.Features.Authentication;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -348,6 +349,8 @@ namespace Raven.Server
                     .ConfigureServices(services =>
                     {
                         ConfigureOpenTelemetry(services);
+                        services.Configure<SocketTransportOptions>(options =>
+                            options.CreateBoundListenSocket = NonLocalBind.CreateBoundListenSocket);
 
                         if (Configuration.Http.UseResponseCompression)
                         {
@@ -2241,6 +2244,7 @@ namespace Raven.Server
                     _forTestingPurposes?.UnbindSocketForPort(port);
                     try
                     {
+                        NonLocalBind.Enable(listener.Server);
                         listener.Start();
                     }
                     catch (Exception ex)
